@@ -71,9 +71,7 @@ class ProfilePage extends StatelessWidget {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      bleMeshService.isAdapterReady
-                          ? '蓝牙已就绪'
-                          : '蓝牙待命中',
+                      bleMeshService.isAdapterReady ? '蓝牙已就绪' : '蓝牙待命中',
                       style: const TextStyle(
                         color: Color(0xFF5D7283),
                         fontSize: 14,
@@ -120,7 +118,8 @@ class ProfilePage extends StatelessWidget {
                           foregroundColor: RescuePalette.accent,
                           side: const BorderSide(color: RescuePalette.accent),
                           shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12)),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                       ),
@@ -164,7 +163,9 @@ class ProfilePage extends StatelessWidget {
                 child: Column(
                   children: [
                     SwitchListTile(
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                      ),
                       title: const Text(
                         '自动中继',
                         style: TextStyle(
@@ -177,7 +178,7 @@ class ProfilePage extends StatelessWidget {
                         style: TextStyle(color: Color(0xFF5D7283)),
                       ),
                       value: bleMeshService.relayEnabled,
-                      activeColor: RescuePalette.accent,
+                      activeThumbColor: RescuePalette.accent,
                       onChanged: bleMeshService.setRelayEnabled,
                     ),
                     const Divider(height: 1, color: Color(0xFFD9E2E8)),
@@ -205,7 +206,7 @@ class ProfilePage extends StatelessWidget {
                         '检查并重新授予蓝牙相关权限',
                         style: TextStyle(color: Color(0xFF5D7283)),
                       ),
-                      onTap: bleMeshService.ensureRuntimePermissions,
+                      onTap: bleMeshService.init,
                     ),
                   ],
                 ),

@@ -62,8 +62,9 @@ class _AiChatPageState extends State<AiChatPage> {
         return;
       }
 
-      final eventContextId =
-          double.tryParse(event['contextId']?.toString() ?? '');
+      final eventContextId = double.tryParse(
+        event['contextId']?.toString() ?? '',
+      );
       if (eventContextId != _contextId) {
         return;
       }
@@ -99,10 +100,7 @@ class _AiChatPageState extends State<AiChatPage> {
       _isInitializing = true;
       _initError = null;
       if (!autoTriggered || _messages.isEmpty) {
-        _messages.add({
-          'role': 'ai',
-          'text': '正在自动准备离线模型，请稍候...',
-        });
+        _messages.add({'role': 'ai', 'text': '正在自动准备离线模型，请稍候...'});
       }
     });
 
@@ -159,10 +157,7 @@ class _AiChatPageState extends State<AiChatPage> {
 
     if (!await modelFile.exists()) {
       final byteData = await rootBundle.load('assets/models/qwen.gguf');
-      await modelFile.writeAsBytes(
-        byteData.buffer.asUint8List(),
-        flush: true,
-      );
+      await modelFile.writeAsBytes(byteData.buffer.asUint8List(), flush: true);
     }
 
     return modelFile.path;
@@ -223,15 +218,14 @@ class _AiChatPageState extends State<AiChatPage> {
       setState(() {
         _messages.last['text'] = '发送失败：$error';
       });
-    } finally {
       _responseBuffer = null;
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _isSending = false;
-      });
     }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isSending = false;
+    });
   }
 
   String _buildPrompt() {
@@ -281,10 +275,7 @@ class _AiChatPageState extends State<AiChatPage> {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [
-            Color(0xFFF6F9FB),
-            Color(0xFFEAF1F5),
-          ],
+          colors: [Color(0xFFF6F9FB), Color(0xFFEAF1F5)],
         ),
       ),
       child: SafeArea(
@@ -320,9 +311,8 @@ class _AiChatPageState extends State<AiChatPage> {
                       children: [
                         Text(
                           '离线 AI 急救助手',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w900,
-                          ),
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w900),
                         ),
                         const SizedBox(height: 4),
                         Text(
@@ -331,11 +321,12 @@ class _AiChatPageState extends State<AiChatPage> {
                               : _isInitializing
                               ? '正在自动加载本地模型...'
                               : '等待模型准备',
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            color: _isModelReady
-                                ? RescuePalette.success
-                                : RescuePalette.textMuted,
-                          ),
+                          style: Theme.of(context).textTheme.bodyMedium
+                              ?.copyWith(
+                                color: _isModelReady
+                                    ? RescuePalette.success
+                                    : RescuePalette.textMuted,
+                              ),
                         ),
                         if (_modelPath.isNotEmpty) ...[
                           const SizedBox(height: 4),
@@ -343,9 +334,8 @@ class _AiChatPageState extends State<AiChatPage> {
                             '模型路径：$_modelPath',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: RescuePalette.textMuted,
-                            ),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: RescuePalette.textMuted),
                           ),
                         ],
                       ],
@@ -435,7 +425,9 @@ class _AiChatPageState extends State<AiChatPage> {
                   ),
                   const SizedBox(width: 10),
                   FilledButton(
-                    onPressed: _isSending || !_isModelReady ? null : _sendMessage,
+                    onPressed: _isSending || !_isModelReady
+                        ? null
+                        : _sendMessage,
                     style: FilledButton.styleFrom(
                       backgroundColor: RescuePalette.accent,
                       foregroundColor: Colors.white,
@@ -464,17 +456,10 @@ class _AiChatPageState extends State<AiChatPage> {
     );
   }
 
-  Widget _buildBubble({
-    required String text,
-    required bool isUser,
-  }) {
+  Widget _buildBubble({required String text, required bool isUser}) {
     final alignment = isUser ? Alignment.centerRight : Alignment.centerLeft;
-    final bubbleColor = isUser
-        ? const Color(0xFFDCEBF7)
-        : RescuePalette.panel;
-    final borderColor = isUser
-        ? const Color(0xFFA8C7DE)
-        : RescuePalette.border;
+    final bubbleColor = isUser ? const Color(0xFFDCEBF7) : RescuePalette.panel;
+    final borderColor = isUser ? const Color(0xFFA8C7DE) : RescuePalette.border;
 
     return Align(
       alignment: alignment,

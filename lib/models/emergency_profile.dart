@@ -1,9 +1,9 @@
 enum BloodType {
-  unknown(0),
-  a(1),
-  b(2),
-  ab(3),
-  o(4);
+  unknown(-1),
+  a(0),
+  b(1),
+  ab(2),
+  o(3);
 
   const BloodType(this.code);
 

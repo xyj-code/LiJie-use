@@ -58,7 +58,7 @@ class _MainScreenState extends State<MainScreen> {
     _incomingSosSubscription = bleScannerService.sosMessageStream.listen((
       message,
     ) {
-      appDb.saveIncomingSos(message).catchError((_) => null);
+      appDb.saveIncomingSos(message).catchError((_) => 0);
     });
   }
 

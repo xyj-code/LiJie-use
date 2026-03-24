@@ -55,7 +55,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
       _historyCtrl.text = p.getString(_kHistory) ?? '';
       _allergyCtrl.text = p.getString(_kAllergy) ?? '';
       _contactCtrl.text = p.getString(_kContact) ?? '';
-      final code = p.getInt(_kBlood) ?? 0;
+      final code = p.getInt(_kBlood) ?? -1;
       _blood = BloodType.values.firstWhere(
         (t) => t.code == code,
         orElse: () => BloodType.unknown,

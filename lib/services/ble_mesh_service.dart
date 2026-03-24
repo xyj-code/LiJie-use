@@ -134,7 +134,7 @@ class BleMeshService extends ChangeNotifier {
       throw exception;
     } on BleMeshException catch (error) {
       _setException(error);
-      throw error;
+      rethrow;
     }
   }
 

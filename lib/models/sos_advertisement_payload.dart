@@ -24,7 +24,7 @@ class SosAdvertisementPayload {
     data.setUint8(0, sosFlag ? 1 : 0);
     data.setInt32(1, _encodeCoordinate(latitude), Endian.little);
     data.setInt32(5, _encodeCoordinate(longitude), Endian.little);
-    data.setUint8(9, bloodType.code);
+    data.setInt8(9, bloodType.code);
     return data.buffer.asUint8List();
   }
 

@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -119,7 +118,7 @@ class BleScannerService extends ChangeNotifier {
     final sosFlag = byteData.getUint8(0) != 0;
     final latitude = _decodeCoordinate(byteData, 1, isLatitude: true);
     final longitude = _decodeCoordinate(byteData, 5, isLatitude: false);
-    final bloodTypeCode = byteData.getUint8(9);
+    final bloodTypeCode = byteData.getInt8(9);
 
     return SosMessage(
       companyId: companyId,
@@ -232,7 +231,8 @@ class BleScannerService extends ChangeNotifier {
 
   void _handleScanResults(List<ScanResult> results) {
     for (final result in results) {
-      final payload = result.advertisementData.manufacturerData[rescueCompanyId];
+      final payload =
+          result.advertisementData.manufacturerData[rescueCompanyId];
       if (payload == null) {
         continue;
       }
@@ -340,9 +340,7 @@ class BleScannerService extends ChangeNotifier {
     }
     if (message.contains('powered off') ||
         message.contains('bluetooth') && message.contains('off')) {
-      return const BleMeshBluetoothDisabledException(
-        '蓝牙已关闭，无法继续扫描。',
-      );
+      return const BleMeshBluetoothDisabledException('蓝牙已关闭，无法继续扫描。');
     }
     if (message.contains('unsupported')) {
       return const BleMeshUnsupportedException('当前设备不支持 BLE 扫描。');
