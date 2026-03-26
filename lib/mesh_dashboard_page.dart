@@ -9,6 +9,7 @@ import 'models/sos_message.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
+import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
 
 class MeshDashboardPage extends StatefulWidget {
@@ -107,7 +108,9 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
         );
       }
 
-      final locationData = await location.getLocation();
+      final locationData = await powerSavingManager.acquireLocationFix(
+        location: location,
+      );
       final latitude = locationData.latitude;
       final longitude = locationData.longitude;
       if (latitude == null || longitude == null) {

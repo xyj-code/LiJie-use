@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'medical_profile_page.dart';
 import 'models/emergency_profile.dart';
 import 'services/ble_mesh_service.dart';
+import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
+import 'widgets/ultra_power_switch_widget.dart';
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({super.key});
@@ -11,7 +13,11 @@ class ProfilePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: bleMeshService,
+      animation: Listenable.merge([
+        bleMeshService,
+        powerSavingManager,
+        EmergencyProfile.emergencyProfile,
+      ]),
       builder: (context, _) {
         return Container(
           decoration: const BoxDecoration(
@@ -142,7 +148,7 @@ class ProfilePage extends StatelessWidget {
                     const Divider(height: 1, color: Color(0xFFD9E2E8)),
                     _InfoRow(
                       icon: Icons.warning_amber,
-                      iconColor: Color(0xFFE29726),
+                      iconColor: const Color(0xFFE29726),
                       label: '过敏史',
                       value: EmergencyProfile.current.allergies,
                     ),
@@ -154,6 +160,15 @@ class ProfilePage extends StatelessWidget {
                       value: EmergencyProfile.current.emergencyContact,
                     ),
                   ],
+                ),
+              ),
+              const SizedBox(height: 18),
+              const _SectionCard(
+                title: '绝境省电',
+                stripeColor: Color(0xFFC7921F),
+                child: Padding(
+                  padding: EdgeInsets.all(16),
+                  child: UltraPowerSwitchWidget(),
                 ),
               ),
               const SizedBox(height: 18),
@@ -203,10 +218,35 @@ class ProfilePage extends StatelessWidget {
                         ),
                       ),
                       subtitle: const Text(
-                        '检查并重新授予蓝牙相关权限',
+                        '检查并重新授予蓝牙与定位运行权限',
                         style: TextStyle(color: Color(0xFF5D7283)),
                       ),
                       onTap: bleMeshService.init,
+                    ),
+                    const Divider(height: 1, color: Color(0xFFD9E2E8)),
+                    ListTile(
+                      leading: Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF9F1DD),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: const Icon(Icons.bolt, color: Color(0xFFC7921F)),
+                      ),
+                      title: const Text(
+                        '当前省电策略',
+                        style: TextStyle(
+                          color: Color(0xFF14202A),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      subtitle: Text(
+                        "BLE ${powerSavingManager.getBleAdvertiseInterval().inSeconds}s｜"
+                        "GPS ${powerSavingManager.getGpsUpdatePolicy().description}｜"
+                        "AI ${powerSavingManager.shouldEnableLocalAi() ? '可用' : '已关闭'}",
+                        style: const TextStyle(color: Color(0xFF5D7283)),
+                      ),
                     ),
                   ],
                 ),
@@ -304,12 +344,18 @@ class _InfoRow extends StatelessWidget {
           fontWeight: FontWeight.w600,
         ),
       ),
-      trailing: Text(
-        value,
-        style: const TextStyle(
-          color: Color(0xFF14202A),
-          fontSize: 16,
-          fontWeight: FontWeight.w800,
+      trailing: SizedBox(
+        width: 150,
+        child: Text(
+          value,
+          textAlign: TextAlign.end,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Color(0xFF14202A),
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+          ),
         ),
       ),
     );

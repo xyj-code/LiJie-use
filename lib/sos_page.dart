@@ -5,6 +5,7 @@ import 'database.dart';
 import 'models/emergency_profile.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
+import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
 
 class SosPage extends StatefulWidget {
@@ -57,7 +58,9 @@ class _SosPageState extends State<SosPage> {
         _statusText = '正在写入本地 Drift 记录，并启动 SOS 广播...';
       });
 
-      final locationData = await location.getLocation();
+      final locationData = await powerSavingManager.acquireLocationFix(
+        location: location,
+      );
       final latitude = locationData.latitude;
       final longitude = locationData.longitude;
       if (latitude == null || longitude == null) {

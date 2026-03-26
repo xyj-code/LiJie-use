@@ -10,9 +10,12 @@ import 'profile_page.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
 import 'services/network_sync_service.dart';
+import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await powerSavingManager.initialize();
   runApp(const RescueApp());
 }
 
@@ -30,6 +33,8 @@ class RescueApp extends StatelessWidget {
   }
 }
 
+enum _MainTab { dashboard, ai, message, profile }
+
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -38,20 +43,14 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
-  int _currentIndex = 0;
-  late final List<Widget> _pages;
+  _MainTab _currentTab = _MainTab.dashboard;
   StreamSubscription<dynamic>? _incomingSosSubscription;
 
   @override
   void initState() {
     super.initState();
-    _pages = [
-      MeshDashboardPage(),
-      const AiChatPage(),
-      const MessagePage(),
-      const ProfilePage(),
-    ];
 
+    powerSavingManager.initialize().catchError((_) => null);
     bleMeshService.init().catchError((_) => null);
     bleScannerService.init().catchError((_) => null);
     networkSyncService.startListening().catchError((_) => null);
@@ -70,54 +69,105 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: AnimatedBuilder(
-          animation: Listenable.merge([bleMeshService, bleScannerService]),
-          builder: (context, _) {
-            final ready =
-                bleMeshService.permissionsGranted &&
-                bleScannerService.permissionsGranted &&
-                (bleMeshService.isAdapterReady ||
-                    bleScannerService.isAdapterReady);
+    return AnimatedBuilder(
+      animation: Listenable.merge([
+        bleMeshService,
+        bleScannerService,
+        powerSavingManager,
+      ]),
+      builder: (context, _) {
+        final visibleTabs = <_MainTab>[
+          _MainTab.dashboard,
+          if (powerSavingManager.shouldEnableLocalAi()) _MainTab.ai,
+          _MainTab.message,
+          _MainTab.profile,
+        ];
+        final effectiveTab = visibleTabs.contains(_currentTab)
+            ? _currentTab
+            : _MainTab.dashboard;
 
-            return Column(
+        if (effectiveTab != _currentTab) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) {
+              return;
+            }
+            setState(() {
+              _currentTab = effectiveTab;
+            });
+          });
+        }
+
+        final ready =
+            bleMeshService.permissionsGranted &&
+            bleScannerService.permissionsGranted &&
+            (bleMeshService.isAdapterReady || bleScannerService.isAdapterReady);
+        final selectedIndex = visibleTabs.indexOf(effectiveTab);
+
+        return Scaffold(
+          appBar: AppBar(
+            title: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Text('Rescue Mesh'),
                 Text(
-                  ready ? '现场终端已就绪，可接入指挥系统' : '终端能力降级，请检查蓝牙与权限',
+                  powerSavingManager.isUltraPowerSavingMode
+                      ? '绝境省电已激活｜AI 已关闭｜BLE ${powerSavingManager.getBleAdvertiseInterval().inSeconds}s'
+                      : ready
+                      ? '现场终端已就绪，可接入指挥系统'
+                      : '终端能力降级，请检查蓝牙与权限',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: ready
+                    color: powerSavingManager.isUltraPowerSavingMode
+                        ? const Color(0xFFC7921F)
+                        : ready
                         ? RescuePalette.success
                         : RescuePalette.critical,
                     letterSpacing: 0.8,
                   ),
                 ),
               ],
-            );
-          },
-        ),
-      ),
-      body: _pages[_currentIndex],
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (index) {
-          setState(() {
-            _currentIndex = index;
-          });
-        },
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: '首页'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.medical_services),
-            label: 'AI 助手',
+            ),
           ),
-          BottomNavigationBarItem(icon: Icon(Icons.message), label: '记录'),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: '资料'),
-        ],
-      ),
+          body: _buildPage(effectiveTab),
+          bottomNavigationBar: BottomNavigationBar(
+            currentIndex: selectedIndex,
+            onTap: (index) {
+              setState(() {
+                _currentTab = visibleTabs[index];
+              });
+            },
+            items: visibleTabs
+                .map((tab) => switch (tab) {
+                      _MainTab.dashboard => const BottomNavigationBarItem(
+                        icon: Icon(Icons.dashboard),
+                        label: '首页',
+                      ),
+                      _MainTab.ai => const BottomNavigationBarItem(
+                        icon: Icon(Icons.medical_services),
+                        label: 'AI 助手',
+                      ),
+                      _MainTab.message => const BottomNavigationBarItem(
+                        icon: Icon(Icons.message),
+                        label: '记录',
+                      ),
+                      _MainTab.profile => const BottomNavigationBarItem(
+                        icon: Icon(Icons.person),
+                        label: '资料',
+                      ),
+                    })
+                .toList(),
+          ),
+        );
+      },
     );
+  }
+
+  Widget _buildPage(_MainTab tab) {
+    return switch (tab) {
+      _MainTab.dashboard => MeshDashboardPage(),
+      _MainTab.ai => const AiChatPage(),
+      _MainTab.message => const MessagePage(),
+      _MainTab.profile => const ProfilePage(),
+    };
   }
 }

@@ -320,7 +320,254 @@ Byte 9      : bloodType code
 
 ---
 
-## 🎯 队友优化任务分配
+## � Riverpod 状态管理与声呐雷达
+
+### 架构设计
+
+为了高效处理高频 BLE SOS 广播包，避免频繁 `setState` 导致 UI 卡顿，我们采用了 **Riverpod** 进行全局状态管理，并实现了一个高性能的"声呐雷达"可视化组件。
+
+#### 核心文件结构
+
+```
+lib/
+  models/
+    mesh_state_provider.dart       # Riverpod 状态定义
+    mesh_state_provider.g.dart     # 自动生成的代码（勿手动修改）
+  widgets/
+    sonar_radar_widget.dart        # 高性能雷达组件
+```
+
+### 状态管理器 (`mesh_state_provider.dart`)
+
+**核心特性：**
+
+- **智能去重**: 通过 MAC 地址识别设备，仅在时间戳或 RSSI 显著变化时更新状态
+- **性能优化**: 避免无效的频繁重建，减少 UI 刷新次数
+- **自动清理**: 支持移除超时设备，保持内存整洁
+
+**状态对象：**
+
+```dart
+class MeshState {
+  final Map<String, DiscoveredDevice> discoveredDevices; // MAC -> 设备映射
+  final DateTime? lastScanTime;     // 最后扫描时间
+  final bool isScanning;            // 扫描状态
+  
+  List<DiscoveredDevice> get sortedDevices;  // 按更新时间排序
+  List<DiscoveredDevice> get activeDevices;  // 最近 30 秒活跃设备
+}
+```
+
+**使用方法：**
+
+```dart
+// 1. 在 BLE 扫描回调中添加设备
+final notifier = ref.read(meshStateProvider.notifier);
+notifier.addOrUpdateDevice(macAddress, sosPayload, rssi);
+
+// 2. 在 UI 中监听状态变化
+final meshState = ref.watch(meshStateProvider);
+final devices = meshState.sortedDevices;
+```
+
+**RSSI 距离估算：**
+
+`DiscoveredDevice`提供了基于 RSSI 的距离估算方法：
+
+```dart
+final distance = device.estimatedDistance; // 单位：米（估算值）
+```
+
+> ⚠️ **注意**: RSSI 测距受环境影响较大，仅供可视化参考，不建议用于精确定位。
+
+---
+
+### 声呐雷达组件 (`sonar_radar_widget.dart`)
+
+**性能特性：**
+
+- **60fps 流畅动画**: 使用 `CustomPainter` 直接绘制，避免 Widget 树过度重建
+- **局部刷新**: 仅雷达区域重绘，不影响父组件
+- **淡入动画**: 新设备出现时有平滑的 FadeIn 过渡
+- **脉冲效果**: 每个设备光点带有呼吸灯效果
+
+**视觉效果：**
+
+- 中心绿色同心圆代表自身位置
+- 往外扩散的绿色扫描波纹（Ripple Effect）
+- 红色闪烁光点代表求救者，大小和亮度根据 RSSI 动态调整
+- 深色径向渐变背景，营造科技感和沉浸感
+
+**使用示例：**
+
+```dart
+// 完整雷达（推荐用于独立页面）
+SonarRadarWidget(size: 320)
+
+// 迷你雷达（用于仪表盘概览）
+MiniSonarRadarWidget(size: 160)
+```
+
+**集成到现有页面：**
+
+```dart
+// 在 mesh_dashboard_page.dart 中
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'widgets/SonarRadarWidget.dart';
+
+class MeshDashboardPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // 声呐雷达
+            SonarRadarWidget(size: 360),
+            
+            SizedBox(height: 24),
+            
+            // 设备统计
+            Consumer(
+              builder: (context, ref, _) {
+                final meshState = ref.watch(meshStateProvider);
+                return Text(
+                  '发现 ${meshState.activeDevices.length} 个活跃设备',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+```
+
+**高级定制：**
+
+如需自定义雷达样式，可继承 `ConsumerStatefulWidget`并传入自定义参数：
+
+```dart
+SonarRadarWidget(
+  size: 400,  // 自定义尺寸
+)
+```
+
+颜色主题可通过修改 `RescuePalette`进行调整。
+**演示页面：**
+
+可以参考 [`radar_demo_page.dart`](lib/radar_demo_page.dart) 完整示例，该页面展示了：
+- 如何集成 SonarRadarWidget
+- 如何显示设备统计信息
+- 如何列出设备详情（MAC、距离、RSSI、血型）
+
+---
+
+### 快速上手步骤
+
+1. **在 `main.dart` 中初始化 Riverpod**
+
+```dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+void main() {
+  runApp(
+    ProviderScope(  // 添加这个包装
+      child: MyApp(),
+    ),
+  );
+}
+```
+
+2. **在 BLE 扫描服务中注入 Riverpod 容器引用**
+
+```dart
+class BleScannerService extends ChangeNotifier {
+  Ref? ref;  // 添加这个属性
+  
+  void _handleScanResults(List<ScanResult> results) {
+    for (final result in results) {
+      final payload = _parseAdvertisement(result.advertisementData.manufacturerData);
+      if (payload != null && ref != null) {
+        // 添加到 Riverpod 状态
+        ref!.read(meshStateProvider.notifier).addOrUpdateDevice(
+          result.device.remoteId.toString(),
+          payload,
+          result.rssi,
+        );
+      }
+    }
+  }
+}
+```
+
+3. **在页面中使用雷达组件**
+
+```dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'widgets/SonarRadarWidget.dart';
+
+class MeshDashboardPage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      body: Center(
+        child: SonarRadarWidget(size: 360),
+      ),
+    );
+  }
+}
+```
+---
+
+### 与 BLE 扫描服务集成
+
+在 `ble_scanner_service.dart` 中将扫描结果同步到 Riverpod：
+
+```dart
+void _handleScanResults(List<ScanResult> results) {
+  for (final result in results) {
+    if (result.advertisementData.manufacturerData != null) {
+      // 解析 SOS 载荷
+      final payload = _parseAdvertisement(result.advertisementData.manufacturerData);
+      if (payload != null) {
+        // 添加到 Riverpod 状态
+        meshStateNotifier.addOrUpdateDevice(
+          result.device.remoteId.toString(),
+          payload,
+          result.rssi,
+        );
+      }
+    }
+  }
+}
+```
+
+---
+
+### 最佳实践
+
+1. **避免在 build 方法中调用 `ref.read()`**: 使用`ref.watch()` 让 Riverpod 自动管理生命周期
+2. **精细粒度监听**: 只监听需要的状态字段，避免大范围重建
+3. **定期清理过期数据**: 调用 `notifier.removeStaleDevices(60)` 清理超过 60 秒未更新的设备
+4. **测试不同密度场景**: 确保在 50+ 设备同时出现时仍保持流畅
+
+---
+
+## 📡 联调验证清单
+
+- [ ] 后端控制台无报错，MongoDB 已连接
+- [ ] 大屏左上角显示绿色"已连接"状态
+- [ ] 手机 App 能正常启动，四个 Tab 可切换
+- [ ] 在手机 SOS 页触发广播，另一台手机能扫描到信号
+- [ ] 手机网络恢复后，大屏自动出现新的 SOS 告警卡片和地图红点
+- [ ] **雷达页面能正确显示周围设备，光点位置和 RSSI 匹配**
+- [ ] **快速移动设备时，雷达动画保持 60fps 无卡顿**
+
+---
 
 ### 🖥️ 前端大屏优化 (dashboard/)
 

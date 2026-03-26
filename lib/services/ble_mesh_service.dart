@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../models/emergency_profile.dart';
 import '../models/sos_advertisement_payload.dart';
 import 'ble_mesh_exceptions.dart';
+import 'power_saving_manager.dart';
 
 class BleMeshService extends ChangeNotifier {
   BleMeshService() {
@@ -126,6 +127,8 @@ class BleMeshService extends ChangeNotifier {
       await _broadcastChannel.invokeMethod<void>('startSosBroadcast', {
         'manufacturerId': payload.companyId,
         'payload': payload.manufacturerPayload,
+        'advertiseIntervalMs':
+            powerSavingManager.getBleAdvertiseInterval().inMilliseconds,
       });
       _setException(null);
     } on PlatformException catch (error) {
