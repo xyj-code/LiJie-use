@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../ar_rescue_compass_page.dart';
 import '../models/mesh_state_provider.dart';
 import '../theme/rescue_theme.dart';
 import '../widgets/sonar_radar_widget.dart';
@@ -186,11 +187,26 @@ class _DeviceListTile extends StatelessWidget {
     final signalColor = _getSignalColor(device.rssi);
 
     return ListTile(
+      onTap: () {
+        // 跳转到 AR 搜救罗盘页面
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => ArRescueCompassPage(
+              targetLatitude: device.payload.latitude,
+              targetLongitude: device.payload.longitude,
+              targetRssi: device.rssi,
+              targetName:
+                  '设备 ${device.macAddress.substring(0, 8).toUpperCase()}',
+            ),
+          ),
+        );
+      },
       leading: Container(
         width: 40,
         height: 40,
         decoration: BoxDecoration(
-          color: signalColor.withOpacity(0.2),
+          color: signalColor.withValues(alpha: 0.2),
           shape: BoxShape.circle,
           border: Border.all(color: signalColor, width: 2),
         ),

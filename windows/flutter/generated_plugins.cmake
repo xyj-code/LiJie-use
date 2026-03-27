@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   connectivity_plus
+  geolocator_windows
   permission_handler_windows
   screen_brightness_windows
   sqlite3_flutter_libs
