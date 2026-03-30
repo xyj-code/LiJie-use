@@ -29,6 +29,7 @@ class MedicalProfiles extends Table {
   DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
 }
 
+@DataClassName('SosMessageData')
 class SosMessages extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get senderMac => text()();
@@ -59,7 +60,7 @@ class StoredSosMessage {
   final bool isUploaded;
 }
 
-@DriftDatabase(tables: [SosRecords, MedicalProfiles])
+@DriftDatabase(tables: [SosRecords, MedicalProfiles, SosMessages])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
   AppDatabase.forTesting(super.e);
@@ -97,6 +98,25 @@ class AppDatabase extends _$AppDatabase {
 
   Future<List<SosRecord>> getAllRecords() {
     return select(sosRecords).get();
+  }
+
+  // SOS Messages methods
+  Future<int> addSosMessage({
+    required String senderMac,
+    required double latitude,
+    required double longitude,
+    required int bloodType,
+  }) async {
+    return into(sosMessages).insert(
+      SosMessagesCompanion.insert(
+        senderMac: senderMac,
+        latitude: latitude,
+        longitude: longitude,
+        bloodType: bloodType,
+        timestamp: DateTime.now(),
+        isUploaded: Value(false),
+      ),
+    );
   }
 
   // Medical Profile methods

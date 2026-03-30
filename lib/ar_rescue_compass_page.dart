@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:vibration/vibration.dart';
 
 import '../theme/rescue_theme.dart';
@@ -67,6 +69,9 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
 
   // 标靶是否居中（偏差角 < 5 度）
   bool _isTargetCentered = false;
+
+  // RSSI 估算的距离准确性
+  bool _isRssiAccurate = false;
 
   @override
   void initState() {
@@ -332,6 +337,281 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
     }
   }
 
+  /// 打开地图导航
+  Future<void> _openNavigation() async {
+    try {
+      // 构造 Google Maps 链接
+      final googleMapsUrl =
+          'https://www.google.com/maps/dir/?api=1&destination=${widget.targetLatitude},${widget.targetLongitude}';
+
+      // 构造高德地图链接（中国地区）
+      final gaodeMapUrl =
+          'https://uri.amap.com/marker?position=${widget.targetLongitude},${widget.targetLatitude}&name=${Uri.encodeComponent(widget.targetName)}';
+
+      // 优先使用高德地图（中国地区）
+      final uri = Uri.parse(gaodeMapUrl);
+
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } else {
+        // 降级到 Google Maps
+        final fallbackUri = Uri.parse(googleMapsUrl);
+        if (await canLaunchUrl(fallbackUri)) {
+          await launchUrl(fallbackUri, mode: LaunchMode.externalApplication);
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('无法打开地图应用，请检查是否已安装'),
+                backgroundColor: RescuePalette.warning,
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('打开导航失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('导航失败：${e.toString()}'),
+            backgroundColor: RescuePalette.critical,
+          ),
+        );
+      }
+    }
+  }
+
+  /// 分享求救者位置
+  Future<void> _shareLocation() async {
+    try {
+      // 构造分享文本
+      final shareText =
+          '🆘 SOS 求救位置\\n'
+          '目标：${widget.targetName}\\n'
+          '纬度：${widget.targetLatitude.toStringAsFixed(6)}\\n'
+          '经度：${widget.targetLongitude.toStringAsFixed(6)}\\n'
+          '距离：约${_estimatedDistance.toStringAsFixed(1)}米\\n'
+          'Google Maps: https://www.google.com/maps?q=${widget.targetLatitude},${widget.targetLongitude}\\n'
+          '时间：${DateTime.now().toString()}\\n'
+          '\\n#RescueMesh #SOS';
+
+      // 使用 share_plus 分享
+      await Share.share(shareText, subject: 'SOS 求救位置 - ${widget.targetName}');
+    } catch (e) {
+      debugPrint('分享失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('分享失败：${e.toString()}'),
+            backgroundColor: RescuePalette.warning,
+          ),
+        );
+      }
+    }
+  }
+
+  /// 显示分享和导航操作菜单
+  void _showActionMenu() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        decoration: BoxDecoration(
+          color: RescuePalette.panel,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(top: 12),
+              decoration: BoxDecoration(
+                color: RescuePalette.border,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: RescuePalette.successSoft,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.navigation,
+                  color: RescuePalette.success,
+                ),
+              ),
+              title: const Text('地图导航'),
+              subtitle: const Text('使用外部地图应用导航到目标位置'),
+              onTap: () {
+                Navigator.pop(context);
+                _openNavigation();
+              },
+            ),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: RescuePalette.accentSoft,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.share, color: RescuePalette.accent),
+              ),
+              title: const Text('分享位置'),
+              subtitle: const Text('通过短信、微信等分享求救者位置'),
+              onTap: () {
+                Navigator.pop(context);
+                _shareLocation();
+              },
+            ),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: RescuePalette.warning.withOpacity(0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.info_outline,
+                  color: RescuePalette.warning,
+                ),
+              ),
+              title: const Text('目标信息'),
+              subtitle: const Text('查看详细的求救者信息'),
+              onTap: () {
+                Navigator.pop(context);
+                _showTargetDetails();
+              },
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 显示目标详情对话框
+  void _showTargetDetails() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: RescuePalette.panel,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: RescuePalette.criticalSoft,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.sos, color: RescuePalette.critical),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(widget.targetName)),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildDetailRow(
+                icon: Icons.my_location,
+                label: '纬度',
+                value: widget.targetLatitude.toStringAsFixed(6),
+              ),
+              _buildDetailRow(
+                icon: Icons.location_on,
+                label: '经度',
+                value: widget.targetLongitude.toStringAsFixed(6),
+              ),
+              _buildDetailRow(
+                icon: Icons.straighten,
+                label: '估算距离',
+                value: '${_estimatedDistance.toStringAsFixed(1)} 米',
+              ),
+              _buildDetailRow(
+                icon: Icons.wifi,
+                label: '信号强度',
+                value: '${widget.targetRssi} dBm',
+              ),
+              _buildDetailRow(
+                icon: Icons.access_time,
+                label: '更新时间',
+                value: DateTime.now().toString(),
+              ),
+              const Divider(height: 24),
+              const Text(
+                '提示：以上距离为基于信号强度的估算值，实际距离可能因环境因素有所不同。',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: RescuePalette.textMuted,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('关闭'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              _openNavigation();
+            },
+            icon: const Icon(Icons.navigation),
+            label: const Text('开始导航'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: RescuePalette.success,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 构建详情行
+  Widget _buildDetailRow({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: RescuePalette.accent),
+          const SizedBox(width: 12),
+          Text(
+            label,
+            style: const TextStyle(
+              color: RescuePalette.textMuted,
+              fontSize: 14,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            value,
+            style: const TextStyle(
+              color: RescuePalette.textPrimary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _magnetometerSubscription?.cancel();
@@ -357,6 +637,12 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
           ],
         ),
         actions: [
+          // 更多操作按钮
+          IconButton(
+            icon: const Icon(Icons.menu),
+            tooltip: '更多操作',
+            onPressed: _showActionMenu,
+          ),
           // 显示当前朝向
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -532,24 +818,6 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
           icon: const Icon(Icons.share),
           label: const Text('分享位置'),
           style: ElevatedButton.styleFrom(
-            backgroundColor: RescuePalette.critical,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-          ),
-          onPressed: () {
-            // TODO: 实现位置分享功能
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('位置分享功能开发中')));
-          },
-        ),
-        ElevatedButton.icon(
-          icon: const Icon(Icons.flag),
-          label: const Text('导航'),
-          style: ElevatedButton.styleFrom(
             backgroundColor: RescuePalette.accent,
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
@@ -557,12 +825,20 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
               borderRadius: BorderRadius.circular(12),
             ),
           ),
-          onPressed: () {
-            // TODO: 实现导航功能
-            ScaffoldMessenger.of(
-              context,
-            ).showSnackBar(const SnackBar(content: Text('导航功能开发中')));
-          },
+          onPressed: _shareLocation,
+        ),
+        ElevatedButton.icon(
+          icon: const Icon(Icons.navigation),
+          label: const Text('导航'),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: RescuePalette.success,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+          ),
+          onPressed: _openNavigation,
         ),
       ],
     );

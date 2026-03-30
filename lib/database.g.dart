@@ -846,6 +846,463 @@ class MedicalProfilesCompanion extends UpdateCompanion<MedicalProfile> {
   }
 }
 
+class $SosMessagesTable extends SosMessages
+    with TableInfo<$SosMessagesTable, SosMessageData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $SosMessagesTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    hasAutoIncrement: true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'PRIMARY KEY AUTOINCREMENT',
+    ),
+  );
+  static const VerificationMeta _senderMacMeta = const VerificationMeta(
+    'senderMac',
+  );
+  @override
+  late final GeneratedColumn<String> senderMac = GeneratedColumn<String>(
+    'sender_mac',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _latitudeMeta = const VerificationMeta(
+    'latitude',
+  );
+  @override
+  late final GeneratedColumn<double> latitude = GeneratedColumn<double>(
+    'latitude',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _longitudeMeta = const VerificationMeta(
+    'longitude',
+  );
+  @override
+  late final GeneratedColumn<double> longitude = GeneratedColumn<double>(
+    'longitude',
+    aliasedName,
+    false,
+    type: DriftSqlType.double,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _bloodTypeMeta = const VerificationMeta(
+    'bloodType',
+  );
+  @override
+  late final GeneratedColumn<int> bloodType = GeneratedColumn<int>(
+    'blood_type',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _timestampMeta = const VerificationMeta(
+    'timestamp',
+  );
+  @override
+  late final GeneratedColumn<DateTime> timestamp = GeneratedColumn<DateTime>(
+    'timestamp',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _isUploadedMeta = const VerificationMeta(
+    'isUploaded',
+  );
+  @override
+  late final GeneratedColumn<bool> isUploaded = GeneratedColumn<bool>(
+    'is_uploaded',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_uploaded" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    senderMac,
+    latitude,
+    longitude,
+    bloodType,
+    timestamp,
+    isUploaded,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'sos_messages';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<SosMessageData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('sender_mac')) {
+      context.handle(
+        _senderMacMeta,
+        senderMac.isAcceptableOrUnknown(data['sender_mac']!, _senderMacMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_senderMacMeta);
+    }
+    if (data.containsKey('latitude')) {
+      context.handle(
+        _latitudeMeta,
+        latitude.isAcceptableOrUnknown(data['latitude']!, _latitudeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_latitudeMeta);
+    }
+    if (data.containsKey('longitude')) {
+      context.handle(
+        _longitudeMeta,
+        longitude.isAcceptableOrUnknown(data['longitude']!, _longitudeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_longitudeMeta);
+    }
+    if (data.containsKey('blood_type')) {
+      context.handle(
+        _bloodTypeMeta,
+        bloodType.isAcceptableOrUnknown(data['blood_type']!, _bloodTypeMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_bloodTypeMeta);
+    }
+    if (data.containsKey('timestamp')) {
+      context.handle(
+        _timestampMeta,
+        timestamp.isAcceptableOrUnknown(data['timestamp']!, _timestampMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_timestampMeta);
+    }
+    if (data.containsKey('is_uploaded')) {
+      context.handle(
+        _isUploadedMeta,
+        isUploaded.isAcceptableOrUnknown(data['is_uploaded']!, _isUploadedMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  SosMessageData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return SosMessageData(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      senderMac: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sender_mac'],
+      )!,
+      latitude: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}latitude'],
+      )!,
+      longitude: attachedDatabase.typeMapping.read(
+        DriftSqlType.double,
+        data['${effectivePrefix}longitude'],
+      )!,
+      bloodType: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}blood_type'],
+      )!,
+      timestamp: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}timestamp'],
+      )!,
+      isUploaded: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_uploaded'],
+      )!,
+    );
+  }
+
+  @override
+  $SosMessagesTable createAlias(String alias) {
+    return $SosMessagesTable(attachedDatabase, alias);
+  }
+}
+
+class SosMessageData extends DataClass implements Insertable<SosMessageData> {
+  final int id;
+  final String senderMac;
+  final double latitude;
+  final double longitude;
+  final int bloodType;
+  final DateTime timestamp;
+  final bool isUploaded;
+  const SosMessageData({
+    required this.id,
+    required this.senderMac,
+    required this.latitude,
+    required this.longitude,
+    required this.bloodType,
+    required this.timestamp,
+    required this.isUploaded,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['sender_mac'] = Variable<String>(senderMac);
+    map['latitude'] = Variable<double>(latitude);
+    map['longitude'] = Variable<double>(longitude);
+    map['blood_type'] = Variable<int>(bloodType);
+    map['timestamp'] = Variable<DateTime>(timestamp);
+    map['is_uploaded'] = Variable<bool>(isUploaded);
+    return map;
+  }
+
+  SosMessagesCompanion toCompanion(bool nullToAbsent) {
+    return SosMessagesCompanion(
+      id: Value(id),
+      senderMac: Value(senderMac),
+      latitude: Value(latitude),
+      longitude: Value(longitude),
+      bloodType: Value(bloodType),
+      timestamp: Value(timestamp),
+      isUploaded: Value(isUploaded),
+    );
+  }
+
+  factory SosMessageData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return SosMessageData(
+      id: serializer.fromJson<int>(json['id']),
+      senderMac: serializer.fromJson<String>(json['senderMac']),
+      latitude: serializer.fromJson<double>(json['latitude']),
+      longitude: serializer.fromJson<double>(json['longitude']),
+      bloodType: serializer.fromJson<int>(json['bloodType']),
+      timestamp: serializer.fromJson<DateTime>(json['timestamp']),
+      isUploaded: serializer.fromJson<bool>(json['isUploaded']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'senderMac': serializer.toJson<String>(senderMac),
+      'latitude': serializer.toJson<double>(latitude),
+      'longitude': serializer.toJson<double>(longitude),
+      'bloodType': serializer.toJson<int>(bloodType),
+      'timestamp': serializer.toJson<DateTime>(timestamp),
+      'isUploaded': serializer.toJson<bool>(isUploaded),
+    };
+  }
+
+  SosMessageData copyWith({
+    int? id,
+    String? senderMac,
+    double? latitude,
+    double? longitude,
+    int? bloodType,
+    DateTime? timestamp,
+    bool? isUploaded,
+  }) => SosMessageData(
+    id: id ?? this.id,
+    senderMac: senderMac ?? this.senderMac,
+    latitude: latitude ?? this.latitude,
+    longitude: longitude ?? this.longitude,
+    bloodType: bloodType ?? this.bloodType,
+    timestamp: timestamp ?? this.timestamp,
+    isUploaded: isUploaded ?? this.isUploaded,
+  );
+  SosMessageData copyWithCompanion(SosMessagesCompanion data) {
+    return SosMessageData(
+      id: data.id.present ? data.id.value : this.id,
+      senderMac: data.senderMac.present ? data.senderMac.value : this.senderMac,
+      latitude: data.latitude.present ? data.latitude.value : this.latitude,
+      longitude: data.longitude.present ? data.longitude.value : this.longitude,
+      bloodType: data.bloodType.present ? data.bloodType.value : this.bloodType,
+      timestamp: data.timestamp.present ? data.timestamp.value : this.timestamp,
+      isUploaded: data.isUploaded.present
+          ? data.isUploaded.value
+          : this.isUploaded,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SosMessageData(')
+          ..write('id: $id, ')
+          ..write('senderMac: $senderMac, ')
+          ..write('latitude: $latitude, ')
+          ..write('longitude: $longitude, ')
+          ..write('bloodType: $bloodType, ')
+          ..write('timestamp: $timestamp, ')
+          ..write('isUploaded: $isUploaded')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    senderMac,
+    latitude,
+    longitude,
+    bloodType,
+    timestamp,
+    isUploaded,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is SosMessageData &&
+          other.id == this.id &&
+          other.senderMac == this.senderMac &&
+          other.latitude == this.latitude &&
+          other.longitude == this.longitude &&
+          other.bloodType == this.bloodType &&
+          other.timestamp == this.timestamp &&
+          other.isUploaded == this.isUploaded);
+}
+
+class SosMessagesCompanion extends UpdateCompanion<SosMessageData> {
+  final Value<int> id;
+  final Value<String> senderMac;
+  final Value<double> latitude;
+  final Value<double> longitude;
+  final Value<int> bloodType;
+  final Value<DateTime> timestamp;
+  final Value<bool> isUploaded;
+  const SosMessagesCompanion({
+    this.id = const Value.absent(),
+    this.senderMac = const Value.absent(),
+    this.latitude = const Value.absent(),
+    this.longitude = const Value.absent(),
+    this.bloodType = const Value.absent(),
+    this.timestamp = const Value.absent(),
+    this.isUploaded = const Value.absent(),
+  });
+  SosMessagesCompanion.insert({
+    this.id = const Value.absent(),
+    required String senderMac,
+    required double latitude,
+    required double longitude,
+    required int bloodType,
+    required DateTime timestamp,
+    this.isUploaded = const Value.absent(),
+  }) : senderMac = Value(senderMac),
+       latitude = Value(latitude),
+       longitude = Value(longitude),
+       bloodType = Value(bloodType),
+       timestamp = Value(timestamp);
+  static Insertable<SosMessageData> custom({
+    Expression<int>? id,
+    Expression<String>? senderMac,
+    Expression<double>? latitude,
+    Expression<double>? longitude,
+    Expression<int>? bloodType,
+    Expression<DateTime>? timestamp,
+    Expression<bool>? isUploaded,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (senderMac != null) 'sender_mac': senderMac,
+      if (latitude != null) 'latitude': latitude,
+      if (longitude != null) 'longitude': longitude,
+      if (bloodType != null) 'blood_type': bloodType,
+      if (timestamp != null) 'timestamp': timestamp,
+      if (isUploaded != null) 'is_uploaded': isUploaded,
+    });
+  }
+
+  SosMessagesCompanion copyWith({
+    Value<int>? id,
+    Value<String>? senderMac,
+    Value<double>? latitude,
+    Value<double>? longitude,
+    Value<int>? bloodType,
+    Value<DateTime>? timestamp,
+    Value<bool>? isUploaded,
+  }) {
+    return SosMessagesCompanion(
+      id: id ?? this.id,
+      senderMac: senderMac ?? this.senderMac,
+      latitude: latitude ?? this.latitude,
+      longitude: longitude ?? this.longitude,
+      bloodType: bloodType ?? this.bloodType,
+      timestamp: timestamp ?? this.timestamp,
+      isUploaded: isUploaded ?? this.isUploaded,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (senderMac.present) {
+      map['sender_mac'] = Variable<String>(senderMac.value);
+    }
+    if (latitude.present) {
+      map['latitude'] = Variable<double>(latitude.value);
+    }
+    if (longitude.present) {
+      map['longitude'] = Variable<double>(longitude.value);
+    }
+    if (bloodType.present) {
+      map['blood_type'] = Variable<int>(bloodType.value);
+    }
+    if (timestamp.present) {
+      map['timestamp'] = Variable<DateTime>(timestamp.value);
+    }
+    if (isUploaded.present) {
+      map['is_uploaded'] = Variable<bool>(isUploaded.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('SosMessagesCompanion(')
+          ..write('id: $id, ')
+          ..write('senderMac: $senderMac, ')
+          ..write('latitude: $latitude, ')
+          ..write('longitude: $longitude, ')
+          ..write('bloodType: $bloodType, ')
+          ..write('timestamp: $timestamp, ')
+          ..write('isUploaded: $isUploaded')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -853,6 +1310,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $MedicalProfilesTable medicalProfiles = $MedicalProfilesTable(
     this,
   );
+  late final $SosMessagesTable sosMessages = $SosMessagesTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -860,6 +1318,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   List<DatabaseSchemaEntity> get allSchemaEntities => [
     sosRecords,
     medicalProfiles,
+    sosMessages,
   ];
 }
 
@@ -1317,6 +1776,240 @@ typedef $$MedicalProfilesTableProcessedTableManager =
       MedicalProfile,
       PrefetchHooks Function()
     >;
+typedef $$SosMessagesTableCreateCompanionBuilder =
+    SosMessagesCompanion Function({
+      Value<int> id,
+      required String senderMac,
+      required double latitude,
+      required double longitude,
+      required int bloodType,
+      required DateTime timestamp,
+      Value<bool> isUploaded,
+    });
+typedef $$SosMessagesTableUpdateCompanionBuilder =
+    SosMessagesCompanion Function({
+      Value<int> id,
+      Value<String> senderMac,
+      Value<double> latitude,
+      Value<double> longitude,
+      Value<int> bloodType,
+      Value<DateTime> timestamp,
+      Value<bool> isUploaded,
+    });
+
+class $$SosMessagesTableFilterComposer
+    extends Composer<_$AppDatabase, $SosMessagesTable> {
+  $$SosMessagesTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get senderMac => $composableBuilder(
+    column: $table.senderMac,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get latitude => $composableBuilder(
+    column: $table.latitude,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<double> get longitude => $composableBuilder(
+    column: $table.longitude,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get bloodType => $composableBuilder(
+    column: $table.bloodType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get timestamp => $composableBuilder(
+    column: $table.timestamp,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isUploaded => $composableBuilder(
+    column: $table.isUploaded,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$SosMessagesTableOrderingComposer
+    extends Composer<_$AppDatabase, $SosMessagesTable> {
+  $$SosMessagesTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get senderMac => $composableBuilder(
+    column: $table.senderMac,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get latitude => $composableBuilder(
+    column: $table.latitude,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<double> get longitude => $composableBuilder(
+    column: $table.longitude,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get bloodType => $composableBuilder(
+    column: $table.bloodType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get timestamp => $composableBuilder(
+    column: $table.timestamp,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isUploaded => $composableBuilder(
+    column: $table.isUploaded,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$SosMessagesTableAnnotationComposer
+    extends Composer<_$AppDatabase, $SosMessagesTable> {
+  $$SosMessagesTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get senderMac =>
+      $composableBuilder(column: $table.senderMac, builder: (column) => column);
+
+  GeneratedColumn<double> get latitude =>
+      $composableBuilder(column: $table.latitude, builder: (column) => column);
+
+  GeneratedColumn<double> get longitude =>
+      $composableBuilder(column: $table.longitude, builder: (column) => column);
+
+  GeneratedColumn<int> get bloodType =>
+      $composableBuilder(column: $table.bloodType, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get timestamp =>
+      $composableBuilder(column: $table.timestamp, builder: (column) => column);
+
+  GeneratedColumn<bool> get isUploaded => $composableBuilder(
+    column: $table.isUploaded,
+    builder: (column) => column,
+  );
+}
+
+class $$SosMessagesTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $SosMessagesTable,
+          SosMessageData,
+          $$SosMessagesTableFilterComposer,
+          $$SosMessagesTableOrderingComposer,
+          $$SosMessagesTableAnnotationComposer,
+          $$SosMessagesTableCreateCompanionBuilder,
+          $$SosMessagesTableUpdateCompanionBuilder,
+          (
+            SosMessageData,
+            BaseReferences<_$AppDatabase, $SosMessagesTable, SosMessageData>,
+          ),
+          SosMessageData,
+          PrefetchHooks Function()
+        > {
+  $$SosMessagesTableTableManager(_$AppDatabase db, $SosMessagesTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$SosMessagesTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$SosMessagesTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$SosMessagesTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> senderMac = const Value.absent(),
+                Value<double> latitude = const Value.absent(),
+                Value<double> longitude = const Value.absent(),
+                Value<int> bloodType = const Value.absent(),
+                Value<DateTime> timestamp = const Value.absent(),
+                Value<bool> isUploaded = const Value.absent(),
+              }) => SosMessagesCompanion(
+                id: id,
+                senderMac: senderMac,
+                latitude: latitude,
+                longitude: longitude,
+                bloodType: bloodType,
+                timestamp: timestamp,
+                isUploaded: isUploaded,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String senderMac,
+                required double latitude,
+                required double longitude,
+                required int bloodType,
+                required DateTime timestamp,
+                Value<bool> isUploaded = const Value.absent(),
+              }) => SosMessagesCompanion.insert(
+                id: id,
+                senderMac: senderMac,
+                latitude: latitude,
+                longitude: longitude,
+                bloodType: bloodType,
+                timestamp: timestamp,
+                isUploaded: isUploaded,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$SosMessagesTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $SosMessagesTable,
+      SosMessageData,
+      $$SosMessagesTableFilterComposer,
+      $$SosMessagesTableOrderingComposer,
+      $$SosMessagesTableAnnotationComposer,
+      $$SosMessagesTableCreateCompanionBuilder,
+      $$SosMessagesTableUpdateCompanionBuilder,
+      (
+        SosMessageData,
+        BaseReferences<_$AppDatabase, $SosMessagesTable, SosMessageData>,
+      ),
+      SosMessageData,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -1325,4 +2018,6 @@ class $AppDatabaseManager {
       $$SosRecordsTableTableManager(_db, _db.sosRecords);
   $$MedicalProfilesTableTableManager get medicalProfiles =>
       $$MedicalProfilesTableTableManager(_db, _db.medicalProfiles);
+  $$SosMessagesTableTableManager get sosMessages =>
+      $$SosMessagesTableTableManager(_db, _db.sosMessages);
 }

@@ -28,7 +28,7 @@ class NetworkSyncService extends ChangeNotifier {
        _httpClient = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null,
        _endpoint =
-           endpoint ?? Uri.parse('https://api.rescuemesh.com/v1/sos/sync'),
+           endpoint ?? Uri.parse('http://192.168.101.20:3000/api/sos/sync'),
        _requestTimeout = requestTimeout ?? const Duration(seconds: 12),
        _connectivityStreamProvider = connectivityStreamProvider,
        _connectivitySnapshotProvider = connectivitySnapshotProvider;

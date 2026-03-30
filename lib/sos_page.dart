@@ -5,6 +5,7 @@ import 'database.dart';
 import 'models/emergency_profile.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
+import 'services/network_sync_service.dart';
 import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
 
@@ -70,11 +71,12 @@ class _SosPageState extends State<SosPage> {
         );
       }
 
-      await appDb.addRecord(
-        SosRecordsCompanion.insert(
-          latitude: latitude.toString(),
-          longitude: longitude.toString(),
-        ),
+      // Save to sos_messages table for immediate upload
+      await appDb.addSosMessage(
+        senderMac: 'SELF', // Mark as self-generated
+        latitude: latitude,
+        longitude: longitude,
+        bloodType: EmergencyProfile.current.bloodType.code,
       );
 
       await bleMeshService.startSosBroadcast(
@@ -82,7 +84,49 @@ class _SosPageState extends State<SosPage> {
         longitude: longitude,
         bloodType: EmergencyProfile.current.bloodType,
       );
+      // Immediately upload to server if network is available
+      if (!mounted) {
+        return;
+      }
 
+      setState(() {
+        _statusText = 'SOS 已进入广播态，正在尝试联网上传至指挥中心...';
+      });
+
+      // Trigger immediate sync
+      try {
+        final uploadedCount = await networkSyncService.syncNow();
+        if (!mounted) {
+          return;
+        }
+
+        if (uploadedCount > 0) {
+          setState(() {
+            _statusText =
+                '✓ SOS 已广播并成功上传至指挥中心！\n'
+                '纬度：$latitude\n'
+                '经度：$longitude\n'
+                '已上传 $uploadedCount 条记录到大屏。';
+          });
+        } else {
+          setState(() {
+            _statusText =
+                'SOS 已广播并存储，但无新记录可上传。\n'
+                '纬度：$latitude\n'
+                '经度：$longitude';
+          });
+        }
+      } catch (error) {
+        if (!mounted) {
+          return;
+        }
+        // Sync failed but SOS is still broadcasting locally
+        setState(() {
+          _statusText =
+              'SOS 已广播并存储，但联网上传失败：$error\n'
+              '数据将保留并在下次联网时自动上传。';
+        });
+      }
       if (!mounted) {
         return;
       }
@@ -219,15 +263,17 @@ class _SosPageState extends State<SosPage> {
                                           ],
                                   ),
                                   border: Border.all(
-                                    color: RescuePalette.textPrimary
-                                        .withValues(alpha: 0.14),
+                                    color: RescuePalette.textPrimary.withValues(
+                                      alpha: 0.14,
+                                    ),
                                   ),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: ((_isLocating || isBroadcasting)
-                                              ? RescuePalette.critical
-                                              : Colors.white)
-                                          .withValues(alpha: 0.25),
+                                      color:
+                                          ((_isLocating || isBroadcasting)
+                                                  ? RescuePalette.critical
+                                                  : Colors.white)
+                                              .withValues(alpha: 0.25),
                                       blurRadius: 26,
                                       spreadRadius: 6,
                                     ),
@@ -288,9 +334,7 @@ class _SosPageState extends State<SosPage> {
                                 bleMeshService.lastError!,
                                 textAlign: TextAlign.center,
                                 style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: RescuePalette.critical,
-                                    ),
+                                    ?.copyWith(color: RescuePalette.critical),
                               ),
                             ],
                           ],

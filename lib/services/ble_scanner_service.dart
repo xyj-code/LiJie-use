@@ -5,7 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../models/sos_message.dart';
+import '../database.dart';
+import '../models/sos_message.dart' as models;
 import 'ble_mesh_exceptions.dart';
 
 class BleScannerService extends ChangeNotifier {
@@ -22,8 +23,8 @@ class BleScannerService extends ChangeNotifier {
   static const int _expectedPayloadLength = 10;
   static const Duration _duplicateSuppressionWindow = Duration(seconds: 30);
 
-  final StreamController<SosMessage> _sosMessageController =
-      StreamController<SosMessage>.broadcast();
+  final StreamController<models.SosMessage> _sosMessageController =
+      StreamController<models.SosMessage>.broadcast();
 
   StreamSubscription<BluetoothAdapterState>? _adapterSubscription;
   StreamSubscription<List<ScanResult>>? _scanResultsSubscription;
@@ -44,7 +45,8 @@ class BleScannerService extends ChangeNotifier {
   bool get isAdapterReady => _adapterState == BluetoothAdapterState.on;
   BleMeshException? get lastException => _lastException;
   String? get lastError => _lastException?.message;
-  Stream<SosMessage> get sosMessageStream => _sosMessageController.stream;
+  Stream<models.SosMessage> get sosMessageStream =>
+      _sosMessageController.stream;
 
   Future<void> init() {
     if (!Platform.isAndroid) {
@@ -100,7 +102,7 @@ class BleScannerService extends ChangeNotifier {
     }
   }
 
-  SosMessage decodeSosPayload(
+  models.SosMessage decodeSosPayload(
     List<int> payload, {
     required String remoteId,
     String deviceName = '',
@@ -120,7 +122,7 @@ class BleScannerService extends ChangeNotifier {
     final longitude = _decodeCoordinate(byteData, 5, isLatitude: false);
     final bloodTypeCode = byteData.getInt8(9);
 
-    return SosMessage(
+    return models.SosMessage(
       companyId: companyId,
       remoteId: remoteId,
       deviceName: deviceName,
@@ -229,7 +231,7 @@ class BleScannerService extends ChangeNotifier {
     _permissionsGranted = true;
   }
 
-  void _handleScanResults(List<ScanResult> results) {
+  Future<void> _handleScanResults(List<ScanResult> results) async {
     for (final result in results) {
       final payload =
           result.advertisementData.manufacturerData[rescueCompanyId];
@@ -246,6 +248,9 @@ class BleScannerService extends ChangeNotifier {
           receivedAt: result.timeStamp,
           companyId: rescueCompanyId,
         );
+
+        // Save to database for persistence and upload
+        await appDb.saveIncomingSos(message);
 
         if (_shouldEmit(message)) {
           _sosMessageController.add(message);
@@ -298,7 +303,7 @@ class BleScannerService extends ChangeNotifier {
         : value >= -180.0 && value <= 180.0;
   }
 
-  bool _shouldEmit(SosMessage message) {
+  bool _shouldEmit(models.SosMessage message) {
     final now = DateTime.now();
     _recentFingerprints.removeWhere(
       (_, timestamp) => now.difference(timestamp) > _duplicateSuppressionWindow,
@@ -315,7 +320,7 @@ class BleScannerService extends ChangeNotifier {
     return true;
   }
 
-  String _buildFingerprint(SosMessage message) {
+  String _buildFingerprint(models.SosMessage message) {
     final payloadHex = message.rawPayload
         .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
         .join();

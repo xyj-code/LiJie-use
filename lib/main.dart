@@ -6,6 +6,8 @@ import 'ai_chat_page.dart';
 import 'database.dart';
 import 'mesh_dashboard_page.dart';
 import 'message_page.dart';
+import 'models/emergency_profile.dart';
+import 'models/sos_message.dart' as models;
 import 'profile_page.dart';
 import 'radar_demo_page.dart';
 import 'services/ble_mesh_service.dart';
@@ -16,7 +18,34 @@ import 'theme/rescue_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize services
   await powerSavingManager.initialize();
+
+  // Auto-load user profile from SharedPreferences
+  await EmergencyProfile.loadFromPrefs();
+
+  // Initialize database and sync loaded profile
+  await appDb
+      .getCurrentMedicalProfile()
+      .then((profile) {
+        if (profile != null) {
+          EmergencyProfile.updateProfile(
+            callsign: profile.name.isNotEmpty
+                ? profile.name
+                : EmergencyProfile.current.callsign,
+            bloodType:
+                profile.bloodType >= 0 &&
+                    profile.bloodType < BloodType.values.length
+                ? BloodType.values[profile.bloodType]
+                : BloodType.unknown,
+            allergies: profile.allergies,
+            emergencyContact: profile.emergencyContact,
+          );
+        }
+      })
+      .catchError((_) => null);
+
   runApp(const RescueApp());
 }
 
@@ -58,7 +87,7 @@ class _MainScreenState extends State<MainScreen> {
     _incomingSosSubscription = bleScannerService.sosMessageStream.listen((
       message,
     ) {
-      appDb.saveIncomingSos(message).catchError((_) => 0);
+      appDb.saveIncomingSos(message as models.SosMessage).catchError((_) => 0);
     });
   }
 

@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 enum BloodType {
   unknown(-1),
@@ -55,8 +56,47 @@ class EmergencyProfile {
 
   /// 从 SharedPreferences 加载数据
   static Future<void> loadFromPrefs() async {
-    // 这里暂时不实现，保持向后兼容
-    // 后续可以从 SharedPreferences 加载真实数据
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final callsign = prefs.getString('emergency_callsign');
+      final bloodTypeCode = prefs.getInt('emergency_blood_type');
+      final allergies = prefs.getString('emergency_allergies');
+      final contact = prefs.getString('emergency_contact');
+
+      if (callsign != null ||
+          bloodTypeCode != null ||
+          allergies != null ||
+          contact != null) {
+        emergencyProfile.value = EmergencyProfile(
+          callsign: callsign ?? current.callsign,
+          bloodType: bloodTypeCode != null
+              ? BloodType.values.firstWhere(
+                  (t) => t.code == bloodTypeCode,
+                  orElse: () => BloodType.unknown,
+                )
+              : current.bloodType,
+          allergies: allergies ?? current.allergies,
+          emergencyContact: contact ?? current.emergencyContact,
+        );
+        debugPrint('[EmergencyProfile] Loaded from SharedPreferences');
+      }
+    } catch (e) {
+      debugPrint('[EmergencyProfile] Error loading from prefs: $e');
+    }
+  }
+
+  /// 保存数据到 SharedPreferences
+  static Future<void> saveToPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('emergency_callsign', current.callsign);
+      await prefs.setInt('emergency_blood_type', current.bloodType.code);
+      await prefs.setString('emergency_allergies', current.allergies);
+      await prefs.setString('emergency_contact', current.emergencyContact);
+      debugPrint('[EmergencyProfile] Saved to SharedPreferences');
+    } catch (e) {
+      debugPrint('[EmergencyProfile] Error saving to prefs: $e');
+    }
   }
 
   /// 更新档案数据
