@@ -4,6 +4,7 @@
     <header class="hdr">
       <span class="hdr-logo">⬡ RESCUE MESH</span>
       <span class="hdr-sub">省级应急指挥中心 · 实时态势</span>
+      <SearchBar />
       <div class="hdr-right">
         <span :class="['conn-dot', connected ? 'on' : 'off']"></span>
         <span class="conn-text">{{ connected ? '实时连接' : '连接断开' }}</span>
@@ -26,6 +27,7 @@ import { useSocket } from './composables/useSocket'
 import AlertFeed     from './components/AlertFeed.vue'
 import MapComponent  from './components/MapComponent.vue'
 import StatsComponent from './components/StatsComponent.vue'
+import SearchBar     from './components/SearchBar.vue'
 
 const { connected, activeCount, connect, fetchActive, disconnect } = useSocket()
 
@@ -65,23 +67,25 @@ onUnmounted(() => {
 .hdr {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 8px 20px;
+  gap: 12px;
+  padding: 8px 16px;
   background: rgba(0, 18, 45, 0.97);
   border-bottom: 1px solid rgba(0, 200, 255, 0.3);
   flex-shrink: 0;
   height: 48px;
 }
 .hdr-logo {
-  font-size: 1.2rem;
+  font-size: 1.1rem;
   font-weight: bold;
   color: #00e5ff;
-  letter-spacing: 4px;
+  letter-spacing: 3px;
+  flex-shrink: 0;
 }
 .hdr-sub {
-  font-size: 0.75rem;
-  color: rgba(0, 200, 255, 0.5);
-  letter-spacing: 2px;
+  font-size: 0.7rem;
+  color: rgba(0, 200, 255, 0.45);
+  letter-spacing: 1px;
+  flex-shrink: 0;
 }
 .hdr-right {
   margin-left: auto;

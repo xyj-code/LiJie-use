@@ -20,6 +20,14 @@ const medicalStats = reactive({
   allergyCount: 0,      // 有过敏史的人数
   historyCount: 0,      // 有病史的人数
 })
+// 搜索过滤状态（跨组件共享）
+const searchState = reactive({
+  keyword: '',
+  blood: '',
+  time: '',
+  activeKeys: new Set(),  // 当前匹配到的 sos key 集合
+  hasFilter: false,       // 是否有活跃过滤条件
+})
 let socket = null
 
 // ── 内部：处理一条新告警 ───────────────────────────────────
@@ -80,6 +88,7 @@ export function useSocket() {
     bloodCounts, 
     hourlyCounts,
     medicalStats,
+    searchState,
     connect, 
     fetchActive, 
     disconnect 
