@@ -76,6 +76,18 @@ export function useSocket() {
     }
   }
 
+  async function fetchHourlyStats() {
+    try {
+      const res  = await fetch(`${API_BASE}/api/sos/hourly-stats`)
+      const json = await res.json()
+      if (json.data && Array.isArray(json.data)) {
+        hourlyCounts.value = json.data
+      }
+    } catch (e) {
+      console.warn('[fetchHourlyStats] 无法加载趋势数据:', e.message)
+    }
+  }
+
   function disconnect() {
     socket?.disconnect()
     socket = null
@@ -91,6 +103,7 @@ export function useSocket() {
     searchState,
     connect, 
     fetchActive, 
+    fetchHourlyStats,
     disconnect 
   }
 }

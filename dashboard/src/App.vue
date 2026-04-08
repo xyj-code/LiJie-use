@@ -29,7 +29,7 @@ import MapComponent  from './components/MapComponent.vue'
 import StatsComponent from './components/StatsComponent.vue'
 import SearchBar     from './components/SearchBar.vue'
 
-const { connected, activeCount, connect, fetchActive, disconnect } = useSocket()
+const { connected, activeCount, connect, fetchActive, fetchHourlyStats, disconnect } = useSocket()
 
 const clock = ref('')
 let clockTimer = null
@@ -45,7 +45,7 @@ onMounted(async () => {
   updateClock()
   clockTimer = setInterval(updateClock, 1000)
   connect()
-  await fetchActive()
+  await Promise.all([fetchActive(), fetchHourlyStats()])
 })
 
 onUnmounted(() => {

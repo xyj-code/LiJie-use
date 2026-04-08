@@ -111,6 +111,58 @@ router.get('/active', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/sos/hourly-stats
+ *
+ * 返回过去 12 小时每小时的 SOS 信号数量，供大屏趋势折线图使用。
+ * 返回数组长度为 12，索引 0 = 11 小时前，索引 11 = 当前小时。
+ */
+router.get('/hourly-stats', async (req, res) => {
+  try {
+    const now = new Date();
+    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+
+    // MongoDB 聚合：按小时分组统计
+    const pipeline = [
+      { $match: { timestamp: { $gte: twelveHoursAgo, $lte: now } } },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d %H', date: '$timestamp' },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ];
+
+    const aggResult = await SosRecord.aggregate(pipeline);
+
+    // 构建 12 个连续小时的映射
+    const hourMap = {};
+    for (let i = 0; i < 12; i++) {
+      const h = new Date(now.getTime() - (11 - i) * 60 * 60 * 1000);
+      const key = `${h.getFullYear()}-${String(h.getMonth() + 1).padStart(2, '0')}-${String(h.getDate()).padStart(2, '0')} ${String(h.getHours()).padStart(2, '0')}`;
+      hourMap[key] = 0;
+    }
+
+    // 填入聚合结果
+    for (const row of aggResult) {
+      if (hourMap.hasOwnProperty(row._id)) {
+        hourMap[row._id] = row.count;
+      }
+    }
+
+    // 转为数组（索引 0 = 11 小时前，索引 11 = 当前小时）
+    const hourlyData = Object.values(hourMap);
+
+    return res.status(200).json({ data: hourlyData });
+  } catch (err) {
+    console.error('[GET /hourly-stats]', err);
+    return res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
 // ════════════════════════════════════════════════════════════
 //  工具函数
 // ════════════════════════════════════════════════════════════

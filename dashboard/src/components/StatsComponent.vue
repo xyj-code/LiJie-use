@@ -99,9 +99,8 @@ function roseOpt() {
 function lineOpt() {
   const now = new Date()
   const xLabels = Array.from({ length: 12 }, (_, i) => {
-    const h = new Date(now)
-    h.setHours(h.getHours() - (11 - i))
-    return `${String(h.getHours()).padStart(2, '0')}时`
+    const ago = 11 - i
+    return ago === 0 ? '当前' : `${ago}h前`
   })
 
   return {
@@ -113,16 +112,20 @@ function lineOpt() {
       textStyle: { color: '#e0f4ff', fontSize: 11 },
       formatter: (p) => `${p[0].axisValue}：${p[0].value} 次求救`,
     },
-    grid: { top: 18, right: 14, bottom: 32, left: 34 },
+    grid: { top: 18, right: 14, bottom: 32, left: 42 },
     xAxis: {
       type: 'category',
       data: xLabels,
+      name: '时间',
+      nameTextStyle: { color: 'rgba(150,200,255,0.5)', fontSize: 9, padding: [0, 0, 4, 0] },
       axisLabel: { color: 'rgba(150,200,255,0.5)', fontSize: 9 },
       axisLine:  { lineStyle: { color: 'rgba(0,200,255,0.2)' } },
       splitLine: { show: false },
     },
     yAxis: {
       type: 'value',
+      name: '次数',
+      nameTextStyle: { color: 'rgba(150,200,255,0.5)', fontSize: 9 },
       minInterval: 1,
       axisLabel: { color: 'rgba(150,200,255,0.5)', fontSize: 9 },
       splitLine: { lineStyle: { color: 'rgba(0,200,255,0.07)', type: 'dashed' } },
