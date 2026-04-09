@@ -4,6 +4,7 @@ const SosRecord = require('../models/SosRecord');
 const socketService = require('../socket');
 const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
+const { generateSingleRescuePlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
@@ -329,6 +330,119 @@ router.post('/ai/chat', async (req, res) => {
     return res.status(200).json({ data: { answer } });
   } catch (err) {
     console.error('[POST /ai/chat]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/sos/ai/rescue-plan/:mac
+ *
+ * AI辅助决策 - 获取指定求救者的完整救援计划
+ * 包含：详细地址、路线规划、医疗建议、推荐医院
+ * 
+ * 查询参数：
+ * - hospitalLng: 医院经度（可选，默认使用配置的默认医院）
+ * - hospitalLat: 医院纬度（可选）
+ * - hospitalName: 医院名称（可选）
+ */
+router.get('/ai/rescue-plan/:mac', async (req, res) => {
+  try {
+    const { mac } = req.params;
+    const { hospitalLng, hospitalLat, hospitalName } = req.query;
+    
+    // 查询求救记录
+    const sosRecord = await SosRecord.findOne({ 
+      senderMac: mac.toUpperCase(),
+      status: 'active' 
+    }).lean({ virtuals: true });
+    
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到活跃的求救记录' });
+    }
+    
+    // 重新计算优先级
+    const ranked = rankSosList([sosRecord]);
+    sosRecord.priority = ranked[0]?.priority || null;
+    
+    // 构建医院列表
+    let hospitals = [];
+    if (hospitalLng && hospitalLat) {
+      // 使用指定的医院
+      hospitals.push({
+        name: hospitalName || '指定医院',
+        lng: parseFloat(hospitalLng),
+        lat: parseFloat(hospitalLat),
+      });
+    }
+    // 如果未指定，rescuePlannerService会使用DEFAULT_HOSPITALS
+    
+    // 生成救援计划
+    const plan = await generateSingleRescuePlan(sosRecord, hospitals.length > 0 ? hospitals : undefined);
+    
+    return res.status(200).json({ data: plan });
+  } catch (err) {
+    console.error('[GET /ai/rescue-plan]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/sos/ai/batch-rescue-plan
+ *
+ * AI辅助决策 - 批量救援计划优化
+ * 输入：多个求救者MAC列表 + 出发点（医院/救援队位置）
+ * 输出：最优救援顺序 + 预计总耗时
+ * 
+ * 请求体：
+ * {
+ *   "macs": ["AA:BB:CC:DD:EE:FF", ...],  // MAC地址数组
+ *   "originLng": 116.397,                  // 出发点经度
+ *   "originLat": 39.918,                   // 出发点纬度
+ *   "originName": "市第一人民医院",         // 出发点名称（可选）
+ *   "optimizationStrategy": "efficiency"  // 优化策略: efficiency|urgency|distance
+ * }
+ */
+router.post('/ai/batch-rescue-plan', async (req, res) => {
+  try {
+    const { macs, originLng, originLat, originName, optimizationStrategy } = req.body;
+    
+    if (!Array.isArray(macs) || macs.length === 0) {
+      return res.status(400).json({ error: '请提供有效的MAC地址列表' });
+    }
+    
+    if (!originLng || !originLat) {
+      return res.status(400).json({ error: '请提供出发点坐标 (originLng, originLat)' });
+    }
+    
+    // 查询所有求救记录
+    const sosRecords = await SosRecord.find({
+      senderMac: { $in: macs.map(m => m.toUpperCase()) },
+      status: 'active',
+    }).lean({ virtuals: true });
+    
+    if (sosRecords.length === 0) {
+      return res.status(404).json({ error: '未找到任何活跃的求救记录' });
+    }
+    
+    // 重新计算优先级
+    const ranked = rankSosList(sosRecords);
+    
+    // 优化救援顺序
+    const optimization = await optimizeBatchRescue(
+      ranked,
+      {
+        lng: parseFloat(originLng),
+        lat: parseFloat(originLat),
+        name: originName || '出发点',
+      },
+      {
+        optimizationStrategy: optimizationStrategy || 'efficiency',
+      }
+    );
+    
+    return res.status(200).json({ data: optimization });
+  } catch (err) {
+    console.error('[POST /ai/batch-rescue-plan]', err);
     return res.status(500).json({ error: err.message });
   }
 });

@@ -78,7 +78,6 @@ class _SosPageState extends State<SosPage> {
         longitude: longitude,
         bloodType: EmergencyProfile.current.bloodType.code,
       );
-
       await bleMeshService.startSosBroadcast(
         latitude: latitude,
         longitude: longitude,
