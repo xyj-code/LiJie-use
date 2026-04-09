@@ -31,7 +31,7 @@ const STALE_THRESHOLD = 30 * 60 * 1000  // 30 分钟
 const PROVINCE_BOUNDARY_URL = 'https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json'
 
 // CartoDB Dark Matter 底图
-const TILE = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+const TILE = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
 
 // 热力图配置
 const HEAT_CONFIG = {
@@ -194,8 +194,7 @@ onMounted(() => {
     zoom: 5,
     zoomControl: false,
     attributionControl: false,
-    preferCanvas: true,
-    fadeAnimation: false,
+    fadeAnimation: true,
     zoomAnimation: true,
     markerZoomAnimation: false,
   })
@@ -203,17 +202,20 @@ onMounted(() => {
   // 地图容器底色设为深色，避免瓦片加载间隙露白/露黑
   mapEl.value.style.background = '#0a0e17'
 
-  L.tileLayer(TILE, {
+  const tileLayer = L.tileLayer(TILE, {
     maxZoom: 19,
+    maxNativeZoom: 19,
     subdomains: 'abcd',
-    updateWhenIdle: false,       // 实时加载瓦片，避免缩放时出现黑块
-    updateInterval: 200,         // 限制加载频率，200ms 节流
+    updateWhenIdle: false,
+    updateWhenZooming: true,
+    updateInterval: 200,
     keepBuffer: 4,
+    fadeAnimation: true,
   }).addTo(map)
   L.control.zoom({ position: 'bottomright' }).addTo(map)
   
   // 初始化热力图层
-  heatLayer = L.heatLayer([], { ...HEAT_CONFIG, redraw: 300 }).addTo(map)
+  heatLayer = L.heatLayer([], { ...HEAT_CONFIG }).addTo(map)
   
   // 初始化标记聚类组
   markerGroup = L.markerClusterGroup({
@@ -276,6 +278,16 @@ function handleFlyTo(e) {
   flyToSos(e.detail)
 }
 window.addEventListener('map-flyto', handleFlyTo)
+
+// 监听飞入风险区域事件
+function handleFlyToArea(e) {
+  if (!map) return
+  const { center, count } = e.detail
+  const [lng, lat] = center
+  const zoom = count >= 8 ? 10 : count >= 5 ? 11 : 12
+  map.flyTo([lat, lng], zoom, { duration: 1.2 })
+}
+window.addEventListener('map-flyto-area', handleFlyToArea)
 
 // 暴露给父组件：飞到指定求救点位置并打开弹窗
 function flyToSos(sos) {

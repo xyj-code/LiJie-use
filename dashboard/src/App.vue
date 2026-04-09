@@ -16,7 +16,10 @@
     <main class="grid">
       <AlertFeed />
       <MapComponent />
-      <StatsComponent />
+      <div class="right-column">
+        <StatsComponent />
+        <AIPanel />
+      </div>
     </main>
   </div>
 </template>
@@ -28,6 +31,7 @@ import AlertFeed     from './components/AlertFeed.vue'
 import MapComponent  from './components/MapComponent.vue'
 import StatsComponent from './components/StatsComponent.vue'
 import SearchBar     from './components/SearchBar.vue'
+import AIPanel       from './components/AIPanel.vue'
 
 const { connected, activeCount, connect, fetchActive, fetchHourlyStats, disconnect } = useSocket()
 
@@ -115,10 +119,20 @@ onUnmounted(() => {
 .grid {
   flex: 1;
   display: grid;
-  grid-template-columns: 22% 1fr 22%;
+  grid-template-columns: 20% 1fr 26%;
   gap: 10px;
   padding: 10px;
   overflow: hidden;
   min-height: 0;
+}
+.right-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.right-column > * {
+  flex-shrink: 0;
 }
 </style>

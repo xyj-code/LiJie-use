@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const SosRecord = require('../models/SosRecord');
 const socketService = require('../socket');
+const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
+const { generateSituationReport, answerQuestion } = require('../services/llmService');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
@@ -163,9 +165,253 @@ router.get('/hourly-stats', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/sos/ai/priorities
+ *
+ * AI辅助决策 - 获取按优先级排序的求救列表
+ * 返回带有优先级评分、严重等级、等待时长的完整排序列表
+ */
+router.get('/ai/priorities', async (req, res) => {
+  try {
+    const activeSos = await SosRecord.find({ status: 'active' })
+      .sort({ timestamp: -1 })
+      .lean({ virtuals: true });
+
+    const ranked = rankSosList(activeSos);
+
+    // 统计各级别数量
+    const summary = {
+      total: ranked.length,
+      critical: ranked.filter(r => r.priority.severityLevel === 'critical').length,
+      urgent: ranked.filter(r => r.priority.severityLevel === 'urgent').length,
+      warning: ranked.filter(r => r.priority.severityLevel === 'warning').length,
+      normal: ranked.filter(r => r.priority.severityLevel === 'normal').length,
+    };
+
+    return res.status(200).json({ data: ranked, summary });
+  } catch (err) {
+    console.error('[GET /ai/priorities]', err);
+    return res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
+/**
+ * GET /api/sos/ai/risk-areas
+ *
+ * AI辅助决策 - 检测风险聚集区域
+ * 返回基于地理聚类的风险区域列表
+ */
+router.get('/ai/risk-areas', async (req, res) => {
+  try {
+    const activeSos = await SosRecord.find({ status: 'active' })
+      .lean({ virtuals: true });
+
+    const riskAreas = detectRiskAreas(activeSos, {
+      radiusKm: 5,
+      minCount: 3,
+      timeWindowMin: 60,
+    });
+
+    return res.status(200).json({ data: riskAreas });
+  } catch (err) {
+    console.error('[GET /ai/risk-areas]', err);
+    return res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
+/**
+ * GET /api/sos/ai/situation-report
+ *
+ * AI辅助决策 - 生成态势摘要
+ * 返回结构化的灾情概况，可用于LLM生成自然语言摘要
+ */
+router.get('/ai/situation-report', async (req, res) => {
+  try {
+    const activeSos = await SosRecord.find({ status: 'active' })
+      .lean({ virtuals: true });
+
+    const ranked = rankSosList(activeSos);
+
+    // 基本信息
+    const total = ranked.length;
+    const criticalMembers = ranked.filter(r => r.priority.severityLevel === 'critical');
+    const urgentMembers = ranked.filter(r => r.priority.severityLevel === 'urgent');
+
+    // 血型分布
+    const bloodDist = {};
+    ranked.forEach(r => {
+      const bt = String(r.bloodType ?? -1);
+      bloodDist[bt] = (bloodDist[bt] || 0) + 1;
+    });
+
+    // 地理分布（按省份粗略统计）
+    const provinceDist = {};
+    ranked.forEach(r => {
+      const lng = r.location.coordinates[0];
+      const lat = r.location.coordinates[1];
+      const province = coordsToProvince(lng, lat);
+      provinceDist[province] = (provinceDist[province] || 0) + 1;
+    });
+
+    // 按数量排序
+    const sortedProvinces = Object.entries(provinceDist)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => ({ name, count }));
+
+    // 等待时间最长的前5名
+    const longestWaiting = ranked
+      .filter(r => r.priority.elapsedMin > 0)
+      .sort((a, b) => b.priority.elapsedMin - a.priority.elapsedMin)
+      .slice(0, 5)
+      .map(r => ({
+        mac: r.senderMac,
+        elapsedMin: r.priority.elapsedMin,
+        severityLevel: r.priority.severityLevel,
+        medicalHistory: r.medicalProfile?.medicalHistory || '无',
+        allergies: r.medicalProfile?.allergies || '无',
+      }));
+
+    return res.status(200).json({
+      data: {
+        total,
+        criticalCount: criticalMembers.length,
+        urgentCount: urgentMembers.length,
+        bloodDistribution: bloodDist,
+        provinceDistribution: sortedProvinces,
+        longestWaiting,
+        topPriorities: ranked.slice(0, 5).map(r => ({
+          mac: r.senderMac,
+          score: r.priority.score,
+          severityLevel: r.priority.severityLevel,
+          breakdown: r.priority.breakdown,
+          medicalHistory: r.medicalProfile?.medicalHistory || '无',
+          allergies: r.medicalProfile?.allergies || '无',
+          elapsedMin: r.priority.elapsedMin,
+          location: r.location.coordinates,
+        })),
+      },
+    });
+  } catch (err) {
+    console.error('[GET /ai/situation-report]', err);
+    return res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
+/**
+ * POST /api/sos/ai/generate-report
+ * 使用 LLM 生成自然语言态势摘要
+ */
+router.post('/ai/generate-report', async (req, res) => {
+  try {
+    const { reportData } = req.body;
+    if (!reportData) {
+      return res.status(400).json({ error: '缺少 reportData 参数' });
+    }
+    const summary = await generateSituationReport(reportData);
+    return res.status(200).json({ data: { summary } });
+  } catch (err) {
+    console.error('[POST /ai/generate-report]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/sos/ai/chat
+ * 智能问答接口
+ */
+router.post('/ai/chat', async (req, res) => {
+  try {
+    const { question, contextData } = req.body;
+    if (!question) {
+      return res.status(400).json({ error: '缺少 question 参数' });
+    }
+    const answer = await answerQuestion(question, contextData || {});
+    return res.status(200).json({ data: { answer } });
+  } catch (err) {
+    console.error('[POST /ai/chat]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ════════════════════════════════════════════════════════════
 //  工具函数
 // ════════════════════════════════════════════════════════════
+
+/**
+ * 射线法判断点是否在多边形内
+ */
+function pointInPolygon(lng, lat, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    const intersect = ((yi > lat) !== (yj > lat)) &&
+      (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * 根据经纬度精确判断所属省份
+ * 使用多边形边界 + 射线法，小省份优先匹配避免被大省份矩形吞没
+ */
+function coordsToProvince(lng, lat) {
+  // 第一优先级：直辖市和小面积省份（用精确多边形，最先匹配）
+  const smallProvinces = [
+    { name: '北京', poly: [[115.4,39.4],[115.4,41.1],[117.5,41.1],[117.5,39.4]] },
+    { name: '上海', poly: [[120.8,30.7],[120.8,31.9],[122.0,31.9],[122.0,30.7]] },
+    { name: '天津', poly: [[116.7,38.5],[116.7,40.2],[118.0,40.2],[118.0,38.5]] },
+    { name: '重庆', poly: [[105.2,28.2],[105.2,32.2],[110.2,32.2],[110.2,28.2]] },
+    { name: '海南', poly: [[108.5,18.0],[108.5,20.3],[111.2,20.3],[111.2,18.0]] },
+    { name: '宁夏', poly: [[104.0,35.0],[104.0,39.5],[107.5,39.5],[107.5,35.0]] },
+  ];
+  for (const p of smallProvinces) {
+    if (pointInPolygon(lng, lat, p.poly)) return p.name;
+  }
+
+  // 第二优先级：其他省份（用矩形框，按从南到北、从东到西排序减少重叠干扰）
+  const provinces = [
+    { name: '广东', lngMin: 109.5, lngMax: 117.5, latMin: 20.0, latMax: 25.5 },
+    { name: '广西', lngMin: 104.0, lngMax: 112.0, latMin: 20.5, latMax: 26.3 },
+    { name: '福建', lngMin: 116.0, lngMax: 120.8, latMin: 23.5, latMax: 28.3 },
+    { name: '台湾', lngMin: 119.5, lngMax: 122.0, latMin: 21.9, latMax: 25.3 },
+    { name: '云南', lngMin: 97.5, lngMax: 106.2, latMin: 21.0, latMax: 29.2 },
+    { name: '贵州', lngMin: 103.5, lngMax: 109.5, latMin: 24.5, latMax: 29.2 },
+    { name: '湖南', lngMin: 108.7, lngMax: 114.3, latMin: 24.6, latMax: 30.1 },
+    { name: '江西', lngMin: 113.5, lngMax: 118.5, latMin: 24.5, latMax: 30.1 },
+    { name: '浙江', lngMin: 118.0, lngMax: 123.0, latMin: 27.0, latMax: 31.2 },
+    { name: '江苏', lngMin: 116.3, lngMax: 121.9, latMin: 30.7, latMax: 35.1 },
+    { name: '安徽', lngMin: 114.8, lngMax: 119.7, latMin: 29.4, latMax: 34.7 },
+    { name: '湖北', lngMin: 108.4, lngMax: 116.1, latMin: 29.0, latMax: 33.3 },
+    { name: '河南', lngMin: 110.3, lngMax: 116.7, latMin: 31.4, latMax: 36.4 },
+    { name: '四川', lngMin: 97.3, lngMax: 108.5, latMin: 26.0, latMax: 34.3 },
+    { name: '山东', lngMin: 114.8, lngMax: 122.7, latMin: 34.2, latMax: 38.3 },
+    { name: '河北', lngMin: 113.3, lngMax: 119.9, latMin: 36.0, latMax: 42.7 },
+    { name: '山西', lngMin: 110.1, lngMax: 114.6, latMin: 34.5, latMax: 40.8 },
+    { name: '陕西', lngMin: 105.5, lngMax: 111.2, latMin: 31.7, latMax: 39.6 },
+    { name: '甘肃', lngMin: 92.1, lngMax: 108.7, latMin: 32.5, latMax: 42.8 },
+    { name: '青海', lngMin: 89.3, lngMax: 103.0, latMin: 31.5, latMax: 39.9 },
+    { name: '西藏', lngMin: 78.4, lngMax: 99.1, latMin: 26.0, latMax: 36.5 },
+    { name: '新疆', lngMin: 73.4, lngMax: 96.4, latMin: 34.2, latMax: 49.2 },
+    { name: '辽宁', lngMin: 118.9, lngMax: 125.5, latMin: 38.7, latMax: 43.5 },
+    { name: '吉林', lngMin: 121.6, lngMax: 131.2, latMin: 40.9, latMax: 46.2 },
+    { name: '黑龙江', lngMin: 121.2, lngMax: 135.1, latMin: 43.4, latMax: 53.5 },
+  ];
+
+  for (const p of provinces) {
+    if (lng >= p.lngMin && lng <= p.lngMax && lat >= p.latMin && lat <= p.latMax) {
+      return p.name;
+    }
+  }
+
+  // 第三优先级：内蒙古（最大省份，放最后避免吞没其他省份）
+  if (lng >= 97.0 && lng <= 126.0 && lat >= 37.3 && lat <= 53.4) {
+    return '内蒙古';
+  }
+
+  return '其他地区';
+}
 
 /**
  * 将请求体中的单条原始记录标准化为写入 DB 的格式。
