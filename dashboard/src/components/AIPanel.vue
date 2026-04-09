@@ -309,6 +309,11 @@ async function fetchPriorities() {
   try {
     const res = await fetch(`${API_BASE}/api/sos/ai/priorities`)
     const json = await res.json()
+    if (json.data?.routeOverlay) {
+      window.dispatchEvent(new CustomEvent('map-show-route', {
+        detail: json.data.routeOverlay,
+      }))
+    }
     priorityList.value = json.data || []
     prioritySummary.value = json.summary || null
   } catch (e) {
@@ -381,7 +386,11 @@ async function sendChat() {
     const res = await fetch(`${API_BASE}/api/sos/ai/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, contextData: situationReport.value }),
+      body: JSON.stringify({
+        question,
+        contextData: situationReport.value,
+        chatHistory: chatMessages.value.slice(-6),
+      }),
     })
     const json = await res.json()
     chatMessages.value.push({ role: 'ai', content: json.data?.answer || '抱歉，暂时无法回答' })

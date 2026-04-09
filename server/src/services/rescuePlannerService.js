@@ -3,7 +3,7 @@
  * 综合地理编码、路径规划、医疗信息，生成完整的救援方案
  */
 
-const { reverseGeocode } = require('./geocodingService');
+const { reverseGeocode, searchNearbyHospitalsWithAMap } = require('./geocodingService');
 const { calculateRoute, batchCalculateRoutes, calculateStraightDistance } = require('./routingService');
 const { rankSosList } = require('../utils/priorityEngine');
 
@@ -61,7 +61,6 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
   } = options;
   
   const [lng, lat] = sosRecord.location.coordinates;
-  const hospitalList = hospitals || DEFAULT_HOSPITALS;
   
   try {
     // ==========================================================================
@@ -85,6 +84,10 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
     // ==========================================================================
     // 2. 计算到各医院的路线，找出最近的
     // ==========================================================================
+    const hospitalList = rankHospitalsForPatient(
+      hospitals || await resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, DEFAULT_HOSPITALS),
+      sosRecord,
+    );
     const hospitalDistances = [];
     
     for (const hospital of hospitalList) {
@@ -123,7 +126,7 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
     hospitalDistances.sort((a, b) => a.distance - b.distance);
     const nearestHospital = hospitalDistances[0];
     
-    if (DEBUG_MODE) {
+    if (DEBUG_MODE && nearestHospital) {
       console.log(`[RescuePlanner] ✓ 最近医院: ${nearestHospital.name} (${(nearestHospital.distance / 1000).toFixed(2)}km)`);
     }
     
@@ -184,8 +187,10 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
       },
       
       // 救援路线
-      route: nearestHospital.route ? {
+      route: nearestHospital?.route ? {
         toHospital: nearestHospital.name,
+        sourceCoordinates: [lng, lat],
+        destinationCoordinates: [nearestHospital.lng, nearestHospital.lat],
         distanceMeters: nearestHospital.route.distance,
         distanceKm: (nearestHospital.route.distance / 1000).toFixed(2),
         estimatedTimeSeconds: nearestHospital.route.duration,
@@ -199,6 +204,7 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
       // 推荐医院列表
       recommendedHospitals: hospitalDistances.slice(0, maxNearbyHospitals).map(h => ({
         name: h.name,
+        location: [h.lng, h.lat],
         distanceMeters: h.distance,
         distanceKm: (h.distance / 1000).toFixed(2),
         estimatedTimeMinutes: Math.ceil(h.duration / 60),
@@ -482,6 +488,311 @@ function summarizeMedicalInfo(profile) {
 /**
  * 生成批量救援摘要
  */
+async function resolveCandidateHospitals(lng, lat, addressInfo, fallbackHospitals = []) {
+  let nearbyHospitals = [];
+
+  try {
+    nearbyHospitals = await searchNearbyHospitalsWithAMap(lng, lat, {
+      radius: 8000,
+      pageSize: 15,
+      keywords: '医院 急救中心 医疗中心',
+    });
+  } catch (err) {
+    if (DEBUG_MODE) {
+      console.warn(`[RescuePlanner] hospital search fallback: ${err.message}`);
+    }
+  }
+
+  return buildCandidateHospitals(addressInfo, fallbackHospitals, nearbyHospitals);
+}
+
+function buildCandidateHospitals(addressInfo, fallbackHospitals = [], searchedHospitals = []) {
+  const nearbyHospitals = Array.isArray(searchedHospitals) && searchedHospitals.length > 0
+    ? searchedHospitals
+        .filter((poi) => isUsableHospitalCandidate(poi))
+        .map((poi) => normalizeHospitalCandidate(poi, 'search_api'))
+        .filter(Boolean)
+    : Array.isArray(addressInfo?.pois)
+    ? addressInfo.pois
+        .filter((poi) => isUsableHospitalCandidate(poi))
+        .filter((poi) => Array.isArray(poi.location) && poi.location.length === 2)
+        .map((poi) => normalizeHospitalCandidate(poi, 'nearby_poi'))
+        .filter(Boolean)
+    : [];
+
+  const sanitizedFallbacks = (Array.isArray(fallbackHospitals) ? fallbackHospitals : [])
+    .filter((hospital) => hospital?.name !== '市第一人民医院');
+
+  const merged = [...nearbyHospitals, ...sanitizedFallbacks];
+  const deduped = [];
+  const seen = new Set();
+
+  for (const hospital of merged) {
+    if (!hospital || typeof hospital.lng !== 'number' || typeof hospital.lat !== 'number') {
+      continue;
+    }
+
+    const key = `${hospital.name || ''}:${hospital.lng.toFixed(5)},${hospital.lat.toFixed(5)}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(hospital);
+  }
+
+  return deduped;
+}
+
+function normalizeHospitalCandidate(poi, source = 'nearby_poi') {
+  const location = Array.isArray(poi?.location) ? poi.location : [];
+  const lng = Number(location[0] ?? poi?.lng);
+  const lat = Number(location[1] ?? poi?.lat);
+  const canonicalName = extractHospitalInstitutionName(poi?.name || '', poi?.type || '');
+
+  if (!Number.isFinite(lng) || !Number.isFinite(lat) || !canonicalName) {
+    return null;
+  }
+
+  return {
+    name: canonicalName,
+    lng,
+    lat,
+    source,
+    approxDistance: poi?.distance ?? poi?.approxDistance ?? null,
+    address: poi?.address || '',
+    type: poi?.type || '',
+  };
+}
+
+function simplifyHospitalName(name) {
+  const text = String(name || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  return text
+    .split('/')[0]
+    .replace(/[（(].*$/, '')
+    .trim();
+}
+
+function extractHospitalInstitutionName(name, type = '') {
+  const text = simplifyHospitalName(name);
+  const typeText = String(type || '');
+
+  if (!text) {
+    return '';
+  }
+
+  const patterns = [
+    /.*?(?:大学(?:附属)?(?:第[一二三四五六七八九十0-9]+)?医院)/,
+    /.*?(?:医学院(?:附属)?(?:第[一二三四五六七八九十0-9]+)?医院)/,
+    /.*?(?:第[一二三四五六七八九十0-9]+人民医院)/,
+    /.*?(?:人民医院)/,
+    /.*?(?:中心医院)/,
+    /.*?(?:总医院)/,
+    /.*?(?:附属医院)/,
+    /.*?(?:妇幼保健院)/,
+    /.*?(?:中医院)/,
+    /.*?(?:儿童医院)/,
+    /.*?(?:肿瘤医院)/,
+    /.*?(?:胸科医院)/,
+    /.*?(?:精神卫生中心)/,
+    /.*?(?:急救中心)/,
+    /.*?(?:医疗中心)/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[0]) {
+      return match[0];
+    }
+  }
+
+  const humanHospitalType = /综合医院|三级甲等医院|三级医院|专科医院|急救中心|医疗中心/.test(typeText);
+  if (humanHospitalType && text.includes('医院')) {
+    const genericMatch = text.match(/.*?医院/);
+    return genericMatch?.[0] || text;
+  }
+
+  return '';
+}
+
+function isHospitalPoi(poi) {
+  if (!poi) {
+    return false;
+  }
+
+  const name = String(poi.name || '');
+  const type = String(poi.type || '');
+  const typeCode = String(poi.typeCode || '');
+
+  return (
+    name.includes('医院')
+    || name.includes('急救中心')
+    || name.includes('医疗中心')
+    || type.includes('医院')
+    || type.includes('医疗保健服务')
+    || typeCode.startsWith('0901')
+  );
+}
+
+function isUsableHospitalCandidate(poi) {
+  if (!isHospitalPoi(poi)) {
+    return false;
+  }
+
+  const name = String(poi?.name || '');
+  const type = String(poi?.type || '');
+  return Boolean(extractHospitalInstitutionName(name, type));
+}
+
+async function resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, fallbackHospitals = []) {
+  const searchPlans = [
+    {
+      keywords: [
+        '\u4eba\u6c11\u533b\u9662',
+        '\u4e2d\u5fc3\u533b\u9662',
+        '\u9644\u5c5e\u533b\u9662',
+        '\u603b\u533b\u9662',
+        '\u4e09\u7532\u533b\u9662',
+      ],
+      radii: [8000, 15000, 30000, 50000],
+    },
+    {
+      keywords: [
+        '\u533b\u9662',
+        '\u6025\u6551\u4e2d\u5fc3',
+        '\u533b\u7597\u4e2d\u5fc3',
+      ],
+      radii: [8000, 15000, 30000, 50000],
+    },
+  ];
+
+  let nearbyHospitals = [];
+
+  for (const plan of searchPlans) {
+    for (const radius of plan.radii) {
+      try {
+        const result = await searchNearbyHospitalsWithAMap(lng, lat, {
+          radius,
+          pageSize: 20,
+          keywords: plan.keywords,
+        });
+
+        if (Array.isArray(result) && result.length > 0) {
+          nearbyHospitals = mergeHospitalCandidates(nearbyHospitals, result);
+          if (nearbyHospitals.length >= 3) {
+            break;
+          }
+        }
+      } catch (err) {
+        if (DEBUG_MODE) {
+          console.warn(`[RescuePlanner] adaptive hospital search: ${err.message}`);
+        }
+      }
+    }
+
+    if (nearbyHospitals.length > 0) {
+      break;
+    }
+  }
+
+  return buildCandidateHospitals(
+    addressInfo,
+    fallbackHospitals,
+    prioritizeMajorHospitals(nearbyHospitals),
+  );
+}
+
+function mergeHospitalCandidates(existing, incoming) {
+  const merged = [...(Array.isArray(existing) ? existing : [])];
+  const seen = new Set(
+    merged.map((item) => `${item.name || ''}:${item.location?.[0] || item.lng}:${item.location?.[1] || item.lat}`),
+  );
+
+  for (const item of Array.isArray(incoming) ? incoming : []) {
+    const key = `${item.name || ''}:${item.location?.[0] || item.lng}:${item.location?.[1] || item.lat}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    merged.push(item);
+  }
+
+  return merged;
+}
+
+function prioritizeMajorHospitals(hospitals) {
+  const majorKeywords = [
+    '\u4e09\u7532',
+    '\u4eba\u6c11\u533b\u9662',
+    '\u4e2d\u5fc3\u533b\u9662',
+    '\u5927\u5b66',
+    '\u9644\u5c5e',
+    '\u603b\u533b\u9662',
+  ];
+
+  return [...(Array.isArray(hospitals) ? hospitals : [])].sort((a, b) => {
+    const aName = String(a?.name || '');
+    const bName = String(b?.name || '');
+    const aMajor = majorKeywords.some((keyword) => aName.includes(keyword)) ? 1 : 0;
+    const bMajor = majorKeywords.some((keyword) => bName.includes(keyword)) ? 1 : 0;
+
+    if (aMajor !== bMajor) {
+      return bMajor - aMajor;
+    }
+
+    return (a?.distance || a?.approxDistance || Infinity) - (b?.distance || b?.approxDistance || Infinity);
+  });
+}
+
+function rankHospitalsForPatient(hospitals, sosRecord) {
+  const age = parsePatientAge(sosRecord?.medicalProfile?.age);
+
+  return [...(Array.isArray(hospitals) ? hospitals : [])].sort((a, b) => {
+    const aPenalty = getHospitalAgePenalty(a?.name || '', age);
+    const bPenalty = getHospitalAgePenalty(b?.name || '', age);
+
+    if (aPenalty !== bPenalty) {
+      return aPenalty - bPenalty;
+    }
+
+    return (a?.approxDistance || a?.distance || Infinity) - (b?.approxDistance || b?.distance || Infinity);
+  });
+}
+
+function parsePatientAge(ageValue) {
+  const match = String(ageValue || '').match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+function getHospitalAgePenalty(name, age) {
+  const text = String(name || '');
+  const isChildHospital = text.includes('\u513f\u7ae5\u533b\u9662');
+  const isWomenChildrenHospital = text.includes('\u5987\u5e7c\u4fdd\u5065\u9662');
+
+  if (age == null) {
+    return 0;
+  }
+
+  if (age >= 16 && isChildHospital) {
+    return 5;
+  }
+
+  if (age >= 16 && isWomenChildrenHospital) {
+    return 2;
+  }
+
+  if (age < 16 && isChildHospital) {
+    return -2;
+  }
+
+  return 0;
+}
+
 function generateBatchSummary(sequence) {
   const severityCounts = {
     critical: 0,

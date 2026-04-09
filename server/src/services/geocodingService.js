@@ -155,6 +155,124 @@ async function reverseGeocodeWithAMap(lng, lat) {
   return result;
 }
 
+async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
+  const {
+    radius = 5000,
+    pageSize = 20,
+    keywords = '医院',
+  } = options;
+
+  const normalizedKeywords = Array.isArray(keywords)
+    ? keywords
+    : String(keywords || '')
+        .split(/[\s,，]+/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+  const queryKeywords = normalizedKeywords.length > 0 ? normalizedKeywords : ['医院'];
+  const normalizedRadius = Math.min(Math.max(parseInt(radius, 10) || 5000, 1000), 50000);
+  const cacheKey = `hospital:amap:${lng.toFixed(6)},${lat.toFixed(6)}:${normalizedRadius}:${pageSize}:${queryKeywords.join('|')}`;
+  const cached = await getCachedAddress(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (AMAP_API_KEY === 'YOUR_AMAP_API_KEY_HERE') {
+    throw new Error('AMAP_API_KEY 鏈厤缃紝璇峰湪 server/.env 涓坊鍔犻珮寰峰湴鍥?API Key');
+  }
+
+  {
+    const baseUrl = 'https://restapi.amap.com/v3/place/around';
+    const allPois = [];
+    const seen = new Set();
+
+    for (const keyword of queryKeywords) {
+      const params = new URLSearchParams({
+        key: AMAP_API_KEY,
+        location: `${lng},${lat}`,
+        radius: String(normalizedRadius),
+        keywords: keyword,
+        types: '090000',
+        sortrule: 'distance',
+        offset: String(pageSize),
+        page: '1',
+        extensions: 'all',
+      });
+
+      const response = await fetch(`${baseUrl}?${params}`);
+      const data = await response.json();
+
+      if (data.status !== '1') {
+        throw new Error(`妤傛ê鐥夐崷鏉挎禈POI API闁挎瑨顕?(${data.infocode}): ${data.info}`);
+      }
+
+      const pois = (data.pois || []).map((poi) => ({
+        id: poi.id,
+        name: poi.name,
+        type: poi.type,
+        typeCode: poi.typecode,
+        address: poi.address || '',
+        tel: poi.tel || '',
+        distance: parseInt(poi.distance || 0, 10),
+        location: String(poi.location || '')
+          .split(',')
+          .map((item) => Number(item)),
+        businessArea: poi.business_area || '',
+      })).filter((poi) => Array.isArray(poi.location) && poi.location.length === 2 && Number.isFinite(poi.location[0]) && Number.isFinite(poi.location[1]));
+
+      for (const poi of pois) {
+        const key = `${poi.id || poi.name}:${poi.location[0]},${poi.location[1]}`;
+        if (seen.has(key)) {
+          continue;
+        }
+
+        seen.add(key);
+        allPois.push(poi);
+      }
+    }
+
+    const mergedPois = allPois.sort((a, b) => a.distance - b.distance).slice(0, pageSize);
+    await setCachedAddress(cacheKey, mergedPois);
+    return mergedPois;
+  }
+
+  const baseUrl = 'https://restapi.amap.com/v3/place/around';
+  const params = new URLSearchParams({
+    key: AMAP_API_KEY,
+    location: `${lng},${lat}`,
+    radius: String(radius),
+    keywords,
+    types: '090100|090101|090102|090104',
+    sortrule: 'distance',
+    offset: String(pageSize),
+    page: '1',
+    extensions: 'all',
+  });
+
+  const response = await fetch(`${baseUrl}?${params}`);
+  const data = await response.json();
+
+  if (data.status !== '1') {
+    throw new Error(`楂樺痉鍦板浘POI API閿欒 (${data.infocode}): ${data.info}`);
+  }
+
+  const pois = (data.pois || []).map((poi) => ({
+    id: poi.id,
+    name: poi.name,
+    type: poi.type,
+    typeCode: poi.typecode,
+    address: poi.address || '',
+    tel: poi.tel || '',
+    distance: parseInt(poi.distance || 0, 10),
+    location: String(poi.location || '')
+      .split(',')
+      .map((item) => Number(item)),
+    businessArea: poi.business_area || '',
+  })).filter((poi) => Array.isArray(poi.location) && poi.location.length === 2 && Number.isFinite(poi.location[0]) && Number.isFinite(poi.location[1]));
+
+  await setCachedAddress(cacheKey, pois);
+  return pois;
+}
+
 /**
  * 使用百度地图进行逆地理编码（备用方案）
  * @param {number} lng - 经度
@@ -300,4 +418,5 @@ module.exports = {
   batchReverseGeocode,
   reverseGeocodeWithAMap,
   reverseGeocodeWithBaidu,
+  searchNearbyHospitalsWithAMap,
 };

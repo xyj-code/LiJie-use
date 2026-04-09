@@ -5,6 +5,7 @@ const socketService = require('../socket');
 const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
 const { generateSingleRescuePlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
+const { reverseGeocode, searchNearbyHospitalsWithAMap } = require('../services/geocodingService');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
@@ -322,14 +323,125 @@ router.post('/ai/generate-report', async (req, res) => {
  */
 router.post('/ai/chat', async (req, res) => {
   try {
-    const { question, contextData } = req.body;
+    const { question, contextData, chatHistory } = req.body;
     if (!question) {
       return res.status(400).json({ error: '缺少 question 参数' });
     }
-    const answer = await answerQuestion(question, contextData || {});
-    return res.status(200).json({ data: { answer } });
+    const activeSos = await SosRecord.find({ status: 'active' })
+      .sort({ timestamp: -1 })
+      .lean({ virtuals: true });
+    const ranked = rankSosList(activeSos);
+    const chatContext = await buildChatContext(question, ranked, {
+      ...(contextData || {}),
+      chatHistory: Array.isArray(chatHistory) ? chatHistory : [],
+    });
+    const answer = await answerQuestion(question, chatContext);
+    return res.status(200).json({ data: { answer, routeOverlay: buildRouteOverlay(chatContext) } });
   } catch (err) {
     console.error('[POST /ai/chat]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/ai/debug-hospitals/:mac', async (req, res) => {
+  try {
+    const { mac } = req.params;
+    const sosRecord = await SosRecord.findOne({
+      senderMac: mac.toUpperCase(),
+      status: 'active',
+    }).lean({ virtuals: true });
+
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到活跃求救记录' });
+    }
+
+    const [lng, lat] = sosRecord.location?.coordinates || [];
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return res.status(400).json({ error: '求救记录缺少有效坐标' });
+    }
+
+    const address = await reverseGeocode(lng, lat);
+    const searchPlans = [
+      {
+        label: 'major',
+        keywords: [
+          '\u4eba\u6c11\u533b\u9662',
+          '\u4e2d\u5fc3\u533b\u9662',
+          '\u9644\u5c5e\u533b\u9662',
+          '\u603b\u533b\u9662',
+          '\u4e09\u7532\u533b\u9662',
+        ],
+        radii: [8000, 15000, 30000, 50000],
+      },
+      {
+        label: 'generic',
+        keywords: [
+          '\u533b\u9662',
+          '\u6025\u6551\u4e2d\u5fc3',
+          '\u533b\u7597\u4e2d\u5fc3',
+        ],
+        radii: [8000, 15000, 30000, 50000],
+      },
+    ];
+
+    const probes = [];
+    for (const plan of searchPlans) {
+      for (const radius of plan.radii) {
+        for (const keyword of plan.keywords) {
+          try {
+            const pois = await searchNearbyHospitalsWithAMap(lng, lat, {
+              radius,
+              pageSize: 10,
+              keywords: [keyword],
+            });
+
+            probes.push({
+              group: plan.label,
+              keyword,
+              radius,
+              count: pois.length,
+              hospitals: pois.slice(0, 5).map((poi) => ({
+                name: poi.name,
+                distance: poi.distance,
+                type: poi.type,
+                address: poi.address,
+                location: poi.location,
+              })),
+            });
+          } catch (error) {
+            probes.push({
+              group: plan.label,
+              keyword,
+              radius,
+              error: error.message,
+            });
+          }
+        }
+      }
+    }
+
+    const ranked = rankSosList([sosRecord]);
+    sosRecord.priority = ranked[0]?.priority || null;
+    const plan = await generateSingleRescuePlan(sosRecord);
+
+    return res.status(200).json({
+      data: {
+        mac: sosRecord.senderMac,
+        coordinates: [lng, lat],
+        address: {
+          formattedAddress: address?.formattedAddress || '',
+          addressComponent: address?.addressComponent || {},
+          pois: (address?.pois || []).slice(0, 5),
+        },
+        probes,
+        finalPlan: {
+          route: plan.route,
+          recommendedHospitals: plan.recommendedHospitals,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[GET /ai/debug-hospitals]', err);
     return res.status(500).json({ error: err.message });
   }
 });
@@ -606,6 +718,452 @@ async function upsertSosRecord(record, muleId, medicalProfile = {}) {
     medicalProfile: Object.keys(medicalProfile).length > 0 ? medicalProfile : undefined,
   });
   return { action: 'created', doc: newDoc };
+}
+
+async function buildChatContext(question, rankedRecords, clientContext = {}) {
+  const chatHistory = Array.isArray(clientContext.chatHistory) ? clientContext.chatHistory : [];
+  const summaryOverrides = { ...clientContext };
+  delete summaryOverrides.chatHistory;
+  const intent = classifyQuestionIntent(question);
+  const topRecords = rankedRecords.slice(0, 8);
+  const matchedRecords = findRelevantRecords(question, rankedRecords, intent, chatHistory);
+  const focusRecords = matchedRecords.length > 0
+    ? matchedRecords.slice(0, intent === 'route_plan' ? 3 : 5)
+    : topRecords.slice(0, intent === 'priority' ? 3 : 5);
+  const planTargets = intent === 'route_plan' ? focusRecords.slice(0, 3) : [];
+  const locationDetailsByMac = new Map();
+
+  const generatedPlans = [];
+  for (const record of planTargets) {
+    try {
+      const plan = await generateSingleRescuePlan(record);
+      generatedPlans.push({
+        mac: record.senderMac,
+        name: record.medicalProfile?.name || '',
+        priorityScore: record.priority?.score ?? 0,
+        severityLevel: record.priority?.severityLevel || 'unknown',
+        address: plan.location?.address || '',
+        routeSummary: plan.route || null,
+        recommendedHospitals: plan.recommendedHospitals || [],
+        dispatchHint: buildDispatchHint(plan.route),
+        aiRecommendations: sanitizePlanRecommendations(plan.aiRecommendations || []),
+      });
+    } catch (error) {
+      generatedPlans.push({
+        mac: record.senderMac,
+        name: record.medicalProfile?.name || '',
+        priorityScore: record.priority?.score ?? 0,
+        severityLevel: record.priority?.severityLevel || 'unknown',
+        address: '',
+        routeSummary: null,
+        recommendedHospitals: [],
+        dispatchHint: '自动规划失败，当前无法给出可靠路线，建议人工调度复核。',
+        aiRecommendations: [`自动规划失败: ${error.message}`],
+      });
+    }
+  }
+
+  if (intent === 'location') {
+    await Promise.all(focusRecords.slice(0, 3).map(async (record) => {
+      const coordinates = record.location?.coordinates || [];
+      if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+        return;
+      }
+
+      try {
+        const address = await reverseGeocode(coordinates[0], coordinates[1]);
+        locationDetailsByMac.set(record.senderMac, {
+          addressText: buildAddressSummary(address),
+          nearbyLandmark: buildNearbyLandmark(address),
+          formattedAddress: address.formattedAddress || '',
+        });
+      } catch (error) {
+        locationDetailsByMac.set(record.senderMac, {
+          addressText: '',
+          nearbyLandmark: '',
+          formattedAddress: '',
+        });
+      }
+    }));
+  }
+
+  return {
+    intent,
+    summary: {
+      total: rankedRecords.length,
+      criticalCount: rankedRecords.filter((r) => r.priority?.severityLevel === 'critical').length,
+      urgentCount: rankedRecords.filter((r) => r.priority?.severityLevel === 'urgent').length,
+      ...summaryOverrides,
+    },
+    rankedCases: focusRecords.map((record) => pruneCaseForIntent({
+      mac: record.senderMac,
+      name: record.medicalProfile?.name || '',
+      age: record.medicalProfile?.age || '',
+      priorityScore: record.priority?.score ?? 0,
+      severityLevel: record.priority?.severityLevel || 'unknown',
+      elapsedMin: record.priority?.elapsedMin ?? 0,
+      bloodTypeName: bloodTypeCodeToLabel(
+        record.medicalProfile?.bloodTypeDetail ?? record.bloodType,
+      ),
+      medicalHistory: record.medicalProfile?.medicalHistory || '',
+      allergies: record.medicalProfile?.allergies || '',
+      emergencyContact: record.medicalProfile?.emergencyContact || '',
+      locationText: formatCoordinates(record.location?.coordinates || []),
+      addressText: locationDetailsByMac.get(record.senderMac)?.addressText || '',
+      nearbyLandmark: locationDetailsByMac.get(record.senderMac)?.nearbyLandmark || '',
+      formattedAddress: locationDetailsByMac.get(record.senderMac)?.formattedAddress || '',
+      confidence: record.confidence ?? (record.reportedBy?.length || 0),
+    }, intent)),
+    generatedPlans: intent === 'route_plan' ? generatedPlans : [],
+  };
+}
+
+function findRelevantRecords(question, rankedRecords, intent = 'general', chatHistory = []) {
+  const upperQuestion = String(question || '').toUpperCase();
+  const macMatches = upperQuestion.match(/[0-9A-F]{2}(?::[0-9A-F]{2}){5}/g) || [];
+  const uniqueMacs = [...new Set(macMatches)];
+
+  const macRecords = rankedRecords.filter((record) => uniqueMacs.includes(record.senderMac));
+  if (macRecords.length > 0) {
+    return macRecords;
+  }
+
+  const nameRecords = rankedRecords.filter((record) => {
+    const name = record.medicalProfile?.name;
+    return name && question.includes(name);
+  });
+  if (nameRecords.length > 0) {
+    return nameRecords;
+  }
+
+  if (intent === 'route_plan' && uniqueMacs.length === 0) {
+    const historyRecords = resolveRecordsFromHistory(chatHistory, rankedRecords);
+    if (historyRecords.length > 0) {
+      return historyRecords;
+    }
+  }
+
+  if (shouldResolveFromHistory(question)) {
+    const historyRecords = resolveRecordsFromHistory(chatHistory, rankedRecords);
+    if (historyRecords.length > 0) {
+      return historyRecords;
+    }
+  }
+
+  if (intent === 'priority') {
+    return rankedRecords.slice(0, 3);
+  }
+
+  return [];
+}
+
+function shouldResolveFromHistory(question) {
+  const text = String(question || '');
+  if (!text) {
+    return false;
+  }
+
+  const referentialPatterns = [
+    /这个人/,
+    /这人/,
+    /这个求救者/,
+    /该求救者/,
+    /该患者/,
+    /这个患者/,
+    /此人/,
+    /他/,
+    /她/,
+    /TA/i,
+    /其位置/,
+    /当前位置/,
+    /在哪里/,
+    /在哪/,
+    /具体位置/,
+    /坐标/,
+    /地点/,
+  ];
+
+  return referentialPatterns.some((pattern) => pattern.test(text));
+}
+
+function resolveRecordsFromHistory(chatHistory, rankedRecords) {
+  if (!Array.isArray(chatHistory) || chatHistory.length === 0) {
+    return [];
+  }
+
+  const recentMessages = chatHistory
+    .slice(-8)
+    .map((item) => String(item?.content || ''))
+    .filter(Boolean)
+    .reverse();
+
+  for (const content of recentMessages) {
+    const macMatches = content.toUpperCase().match(/[0-9A-F]{2}(?::[0-9A-F]{2}){5}/g) || [];
+    for (const mac of macMatches) {
+      const matchedRecord = rankedRecords.find((record) => record.senderMac === mac);
+      if (matchedRecord) {
+        return [matchedRecord];
+      }
+    }
+  }
+
+  const recordsWithNames = rankedRecords
+    .filter((record) => record.medicalProfile?.name)
+    .sort((a, b) => b.medicalProfile.name.length - a.medicalProfile.name.length);
+
+  for (const content of recentMessages) {
+    for (const record of recordsWithNames) {
+      if (content.includes(record.medicalProfile.name)) {
+        return [record];
+      }
+    }
+  }
+
+  return [];
+}
+
+function classifyQuestionIntent(question) {
+  const upperQuestion = String(question || '').toUpperCase();
+  if (
+    upperQuestion.includes('路线') ||
+    upperQuestion.includes('规划') ||
+    upperQuestion.includes('送医') ||
+    upperQuestion.includes('医院') ||
+    upperQuestion.includes('调度') ||
+    upperQuestion.includes('方案')
+  ) {
+    return 'route_plan';
+  }
+  if (
+    upperQuestion.includes('优先') ||
+    upperQuestion.includes('最需要救援') ||
+    upperQuestion.includes('先救')
+  ) {
+    return 'priority';
+  }
+  if (
+    upperQuestion.includes('位置') ||
+    upperQuestion.includes('在哪') ||
+    upperQuestion.includes('哪里') ||
+    upperQuestion.includes('附近') ||
+    upperQuestion.includes('地点') ||
+    upperQuestion.includes('地址') ||
+    upperQuestion.includes('坐标')
+  ) {
+    return 'location';
+  }
+  if (
+    upperQuestion.includes('姓名') ||
+    upperQuestion.includes('名字') ||
+    upperQuestion.includes('是谁') ||
+    upperQuestion.includes('叫什么')
+  ) {
+    return 'identity';
+  }
+  if (
+    upperQuestion.includes('病史') ||
+    upperQuestion.includes('过敏') ||
+    upperQuestion.includes('血型') ||
+    upperQuestion.includes('年龄')
+  ) {
+    return 'medical';
+  }
+  if (
+    upperQuestion.includes('联系人') ||
+    upperQuestion.includes('联系') ||
+    upperQuestion.includes('电话')
+  ) {
+    return 'contact';
+  }
+  return 'general';
+}
+
+function pruneCaseForIntent(data, intent) {
+  switch (intent) {
+    case 'priority':
+      return {
+        mac: data.mac,
+        name: data.name,
+        priorityScore: data.priorityScore,
+        severityLevel: data.severityLevel,
+        elapsedMin: data.elapsedMin,
+        locationText: data.locationText,
+        confidence: data.confidence,
+      };
+    case 'identity':
+      return {
+        mac: data.mac,
+        name: data.name,
+        age: data.age,
+        elapsedMin: data.elapsedMin,
+        locationText: data.locationText,
+      };
+    case 'location':
+      return {
+        mac: data.mac,
+        name: data.name,
+        elapsedMin: data.elapsedMin,
+        locationText: data.locationText,
+        addressText: data.addressText,
+        nearbyLandmark: data.nearbyLandmark,
+        formattedAddress: data.formattedAddress,
+      };
+    case 'medical':
+      return {
+        mac: data.mac,
+        name: data.name,
+        age: data.age,
+        bloodTypeName: data.bloodTypeName,
+        medicalHistory: data.medicalHistory,
+        allergies: data.allergies,
+      };
+    case 'contact':
+      return {
+        mac: data.mac,
+        name: data.name,
+        emergencyContact: data.emergencyContact,
+      };
+    case 'route_plan':
+      return {
+        mac: data.mac,
+        name: data.name,
+        priorityScore: data.priorityScore,
+        severityLevel: data.severityLevel,
+        elapsedMin: data.elapsedMin,
+        allergies: data.allergies,
+        medicalHistory: data.medicalHistory,
+        locationText: data.locationText,
+      };
+    default:
+      return {
+        mac: data.mac,
+        name: data.name,
+        priorityScore: data.priorityScore,
+        severityLevel: data.severityLevel,
+        elapsedMin: data.elapsedMin,
+        locationText: data.locationText,
+      };
+  }
+}
+
+function bloodTypeCodeToLabel(code) {
+  switch (code) {
+    case 0:
+      return 'A';
+    case 1:
+      return 'B';
+    case 2:
+      return 'AB';
+    case 3:
+      return 'O';
+    default:
+      return '未知';
+  }
+}
+
+function formatCoordinates(coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+    return '未知坐标';
+  }
+  return `${coordinates[1]}, ${coordinates[0]}`;
+}
+
+function buildDispatchHint(route) {
+  if (!route) {
+    return '暂无可靠路线，建议属地救援力量先行接触。';
+  }
+
+  if (route.distanceMeters >= 100000 || route.estimatedTimeMinutes >= 120) {
+    return '路线超出常规就近送医范围，建议优先属地就近调度，并视情况升级跨区域协同。';
+  }
+
+  if (route.estimatedTimeMinutes >= 60) {
+    return '路线较长，建议同步通知接收医院并评估是否存在更近接应点。';
+  }
+
+  return '路线处于常规应急转运范围，可按当前推荐方案执行。';
+}
+
+function sanitizePlanRecommendations(recommendations) {
+  if (!Array.isArray(recommendations)) {
+    return [];
+  }
+
+  const blockedPatterns = [
+    /硝酸甘油/,
+    /阿司匹林/,
+    /肝素/,
+    /输血/,
+    /血小板/,
+    /红细胞/,
+    /氧气/,
+    /支气管扩张剂/,
+    /aed/i,
+    /除颤/,
+    /药物/,
+    /剂量/,
+    /给药/,
+    /监护设备/,
+  ];
+
+  const normalized = recommendations
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .filter((item) => !blockedPatterns.some((pattern) => pattern.test(item)));
+
+  return [...new Set(normalized)].slice(0, 4);
+}
+
+function buildAddressSummary(address) {
+  if (!address) {
+    return '';
+  }
+
+  const component = address.addressComponent || {};
+  const parts = [
+    component.province,
+    component.city,
+    component.district,
+    component.township,
+    component.street,
+    component.streetNumber,
+  ].filter(Boolean);
+
+  return parts.join('');
+}
+
+function buildNearbyLandmark(address) {
+  if (!address) {
+    return '';
+  }
+
+  const poi = Array.isArray(address.pois) ? address.pois[0] : null;
+  if (poi?.name) {
+    return poi.distance ? `${poi.name}附近（约${poi.distance}米）` : `${poi.name}附近`;
+  }
+
+  const road = Array.isArray(address.roads) ? address.roads[0] : null;
+  if (road?.name) {
+    return road.distance ? `${road.name}附近（约${road.distance}米）` : `${road.name}附近`;
+  }
+
+  return '';
+}
+
+function buildRouteOverlay(chatContext = {}) {
+  const plans = Array.isArray(chatContext.generatedPlans) ? chatContext.generatedPlans : [];
+  const plan = plans[0];
+  if (!plan?.routeSummary?.fullSteps?.length) {
+    return null;
+  }
+
+  return {
+    mac: plan.mac,
+    name: plan.name || '',
+    hospitalName: plan.routeSummary.toHospital,
+    address: plan.address || '',
+    route: plan.routeSummary,
+  };
 }
 
 module.exports = router;

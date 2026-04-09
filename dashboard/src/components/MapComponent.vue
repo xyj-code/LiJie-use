@@ -23,6 +23,7 @@ let map         = null
 let heatLayer   = null
 let markerGroup = null
 let provinceLayer = null
+let routeLayerGroup = null
 let staleTimer  = null
 const added = new Map()   // key → marker ref，用于标记时效管理
 const STALE_THRESHOLD = 30 * 60 * 1000  // 30 分钟
@@ -163,6 +164,71 @@ function updateStaleMarkers() {
   scheduleStaleCheck()
 }
 
+function clearRouteOverlay() {
+  routeLayerGroup?.clearLayers()
+}
+
+function decodeRoutePolyline(route) {
+  const steps = Array.isArray(route?.fullSteps) ? route.fullSteps : []
+  const points = []
+  const seen = new Set()
+
+  steps.forEach((step) => {
+    const segments = String(step?.polyline || '').split(';').filter(Boolean)
+    segments.forEach((pair) => {
+      const [lng, lat] = pair.split(',').map(Number)
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
+      const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
+      if (seen.has(key)) return
+      seen.add(key)
+      points.push([lat, lng])
+    })
+  })
+
+  return points
+}
+
+function showRouteOverlay(detail) {
+  if (!map || !routeLayerGroup || !detail?.route) return
+
+  clearRouteOverlay()
+
+  const points = decodeRoutePolyline(detail.route)
+  if (points.length < 2) return
+
+  const routeLine = L.polyline(points, {
+    color: '#00e5ff',
+    weight: 5,
+    opacity: 0.9,
+    lineJoin: 'round',
+  }).addTo(routeLayerGroup)
+
+  const startCoords = Array.isArray(detail.route.sourceCoordinates)
+    ? [detail.route.sourceCoordinates[1], detail.route.sourceCoordinates[0]]
+    : points[0]
+  const endCoords = Array.isArray(detail.route.destinationCoordinates)
+    ? [detail.route.destinationCoordinates[1], detail.route.destinationCoordinates[0]]
+    : points[points.length - 1]
+
+  L.circleMarker(startCoords, {
+    radius: 7,
+    color: '#00ff88',
+    weight: 2,
+    fillColor: '#00ff88',
+    fillOpacity: 0.9,
+  }).bindPopup(`<div class="sos-popup"><div class="p-title">起点</div><div class="p-row"><span>${detail.name || detail.mac || ''}</span><span>${detail.address || ''}</span></div></div>`).addTo(routeLayerGroup)
+
+  L.circleMarker(endCoords, {
+    radius: 7,
+    color: '#ffcc00',
+    weight: 2,
+    fillColor: '#ffcc00',
+    fillOpacity: 0.9,
+  }).bindPopup(`<div class="sos-popup"><div class="p-title">终点</div><div class="p-row"><span>${detail.hospitalName || '医院'}</span><span>${detail.route.distanceKm || ''} km</span></div></div>`).addTo(routeLayerGroup)
+
+  map.fitBounds(routeLine.getBounds(), { padding: [40, 40], maxZoom: 16 })
+}
+
 async function loadProvinceBoundary() {
   try {
     const res = await fetch(PROVINCE_BOUNDARY_URL)
@@ -242,6 +308,7 @@ onMounted(() => {
     }
   })
   map.addLayer(markerGroup)
+  routeLayerGroup = L.layerGroup().addTo(map)
 
   mapReady.value = true
   
@@ -252,6 +319,7 @@ onMounted(() => {
 onUnmounted(() => {
   map?.remove()
   window.removeEventListener('map-flyto', handleFlyTo)
+  window.removeEventListener('map-show-route', handleShowRoute)
 })
 
 // 监听搜索状态变化，高亮/淡化标记
@@ -278,6 +346,11 @@ function handleFlyTo(e) {
   flyToSos(e.detail)
 }
 window.addEventListener('map-flyto', handleFlyTo)
+
+function handleShowRoute(e) {
+  showRouteOverlay(e.detail)
+}
+window.addEventListener('map-show-route', handleShowRoute)
 
 // 监听飞入风险区域事件
 function handleFlyToArea(e) {
