@@ -6,6 +6,7 @@ const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
 const { generateSingleRescuePlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
 const { reverseGeocode, searchNearbyHospitalsWithAMap, searchHospitalsByKeywordWithAMap } = require('../services/geocodingService');
+const { wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
@@ -461,6 +462,7 @@ router.get('/ai/debug-hospitals/:mac', async (req, res) => {
     const ranked = rankSosList([sosRecord]);
     sosRecord.priority = ranked[0]?.priority || null;
     const plan = await generateSingleRescuePlan(sosRecord);
+    const routeAnchorDebug = buildRouteAnchorDebug(plan);
 
     return res.status(200).json({
       data: {
@@ -473,6 +475,7 @@ router.get('/ai/debug-hospitals/:mac', async (req, res) => {
         },
         probes,
         keywordProbes,
+        routeAnchorDebug,
         finalPlan: {
           route: plan.route,
           recommendedHospitals: plan.recommendedHospitals,
@@ -1193,6 +1196,103 @@ function buildRouteOverlay(chatContext = {}) {
     address: plan.address || '',
     route: plan.routeSummary,
   };
+}
+
+function buildRouteAnchorDebug(plan = {}) {
+  const route = plan?.route;
+  if (!route) {
+    return null;
+  }
+
+  const routePoints = flattenRouteStepPolylines(route.fullSteps || []);
+  const navStartGcj = routePoints[0] || null;
+  const navEndGcj = routePoints[routePoints.length - 1] || null;
+  const rawSourceWgs = Array.isArray(route.sourceCoordinates) ? route.sourceCoordinates : null;
+  const rawDestinationWgs = Array.isArray(route.destinationCoordinates) ? route.destinationCoordinates : null;
+  const rawSourceGcj = convertWgsPairToGcj(rawSourceWgs);
+  const rawDestinationGcj = convertWgsPairToGcj(rawDestinationWgs);
+
+  return {
+    coordinateSystem: {
+      sourceInput: 'WGS84',
+      destinationInput: 'WGS84',
+      routePolyline: 'GCJ-02',
+      offsetsComparedIn: 'GCJ-02',
+    },
+    selectedHospital: {
+      name: route.destinationMeta?.name || route.toHospital || '',
+      address: route.destinationMeta?.address || '',
+      type: route.destinationMeta?.type || '',
+      source: route.destinationMeta?.source || '',
+    },
+    rawSourceWgs,
+    rawSourceGcj,
+    navStartGcj,
+    sourceOffsetMeters: measureMeters(rawSourceGcj, navStartGcj),
+    rawDestinationWgs,
+    rawDestinationGcj,
+    navEndGcj,
+    destinationOffsetMeters: measureMeters(rawDestinationGcj, navEndGcj),
+  };
+}
+
+function flattenRouteStepPolylines(steps = []) {
+  const points = [];
+  let lastKey = '';
+
+  for (const step of Array.isArray(steps) ? steps : []) {
+    const polyline = String(step?.polyline || '');
+    const pairs = polyline.split(';').filter(Boolean);
+    for (const pair of pairs) {
+      const [lng, lat] = pair.split(',').map(Number);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+        continue;
+      }
+      const key = `${lng.toFixed(6)},${lat.toFixed(6)}`;
+      if (key === lastKey) {
+        continue;
+      }
+      lastKey = key;
+      points.push([lng, lat]);
+    }
+  }
+
+  return points;
+}
+
+function convertWgsPairToGcj(pair) {
+  if (!Array.isArray(pair) || pair.length < 2) {
+    return null;
+  }
+
+  const lng = Number(pair[0]);
+  const lat = Number(pair[1]);
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+    return null;
+  }
+
+  return wgs84ToGcj02(lng, lat);
+}
+
+function measureMeters(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return null;
+  }
+
+  const [lng1, lat1] = a;
+  const [lng2, lat2] = b;
+  if (![lng1, lat1, lng2, lat2].every(Number.isFinite)) {
+    return null;
+  }
+
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const lat1Rad = toRad(lat1);
+  const lat2Rad = toRad(lat2);
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h)));
 }
 
 module.exports = router;

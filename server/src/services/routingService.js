@@ -26,7 +26,7 @@ const BAIDU_MAP_AK = process.env.BAIDU_MAP_AK || 'YOUR_BAIDU_MAP_AK_HERE';
  * 銆愬彲閫夈€戞槸鍚﹀惎鐢ㄧ紦瀛?
  */
 const ENABLE_ROUTECACHE = process.env.ENABLE_ROUTECACHE === 'true';
-const { convertPolylineGcjToWgs, wgs84ToGcj02 } = require('../utils/coordTransform');
+const { wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // ============================================================================
 // 鏈嶅姟瀹炵幇
@@ -146,7 +146,7 @@ async function calculateDrivingRoute(originLng, originLat, destLng, destLat, opt
       road: step.road, // 閬撹矾鍚嶇О
       distance: parseInt(step.distance), // 鏈璺濈锛堢背锛?
       duration: parseInt(step.duration), // 鏈鏃堕棿锛堢锛?
-      polyline: convertPolylineGcjToWgs(step.polyline), // route polyline converted to WGS84
+      polyline: step.polyline, // keep AMap native GCJ-02 polyline for frontend AMap rendering
       assistNodes: step.assist_nodes || [], // 杈呭姪鑺傜偣
     })),
     

@@ -1,5 +1,12 @@
 <template>
   <div ref="mapEl" class="map-wrap">
+    <div v-if="mapError" class="map-error-panel">
+      <div class="map-error-title">地图加载失败</div>
+      <div class="map-error-body">{{ mapError }}</div>
+      <div class="map-error-hint">
+        请检查 `dashboard/.env` 中的 `VITE_AMAP_JS_KEY`、`VITE_AMAP_SECURITY_CODE`，并在修改后重启前端。
+      </div>
+    </div>
     <div v-if="currentRouteState" :class="['route-hud', { compact: isRouteHudCompact }]">
       <div class="route-hud-head">
         <div class="route-hud-head-copy">
@@ -43,97 +50,139 @@
       </div>
       <div v-if="!isRouteHudCompact" class="route-hud-note">虚线表示求救点或医院与实际可通行道路起终点之间的偏移。</div>
     </div>
-    <!-- 扫描线特效 -->
     <div class="scan-line"></div>
   </div>
 </template>
 
 <script setup>
 import { ref, watchEffect, watch, onMounted, onUnmounted } from 'vue'
-import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
-import 'leaflet.heat'
-import 'leaflet.markercluster'
-import 'leaflet.markercluster/dist/MarkerCluster.css'
-import 'leaflet.markercluster/dist/MarkerCluster.Default.css'
 import { useSocket, BLOOD_LABELS } from '../composables/useSocket'
+import { wgs84ToGcj02 } from '../utils/coordTransform'
 
 const { alerts, searchState } = useSocket()
-const mapEl    = ref(null)
+const mapEl = ref(null)
 const mapReady = ref(false)
-
-let map         = null
-let heatLayer   = null
-let markerGroup = null
-let provinceLayer = null
-let routeLayerGroup = null
-let staleTimer  = null
+const mapError = ref('')
 const currentRouteState = ref(null)
 const activeRouteStepIndex = ref(-1)
 const isRouteHudCompact = ref(false)
-const added = new Map()   // key → marker ref，用于标记时效管理
-const STALE_THRESHOLD = 30 * 60 * 1000  // 30 分钟
 
-// 省份边界 GeoJSON 数据源（阿里云 DataV）
-const PROVINCE_BOUNDARY_URL = 'https://geo.datav.aliyun.com/areas_v3/bound/100000_full.json'
+const AMAP_JS_KEY = import.meta.env.VITE_AMAP_JS_KEY || import.meta.env.VITE_AMAP_KEY || ''
+const AMAP_SECURITY_CODE = import.meta.env.VITE_AMAP_SECURITY_CODE || ''
+const AMAP_MAP_STYLE = import.meta.env.VITE_AMAP_MAP_STYLE || 'amap://styles/dark'
+const STALE_THRESHOLD = 30 * 60 * 1000
 
-// CartoDB Dark Matter 底图
-const TILE = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'
+let amapLoadPromise = null
+let AMapLib = null
+let map = null
+let heatmap = null
+let infoWindow = null
+let staleTimer = null
+let activeInfoTargetKey = ''
+const added = new Map()
+let routeOverlays = []
 
-// 热力图配置
-const HEAT_CONFIG = {
-  radius: 35,
-  blur: 25,
-  maxZoom: 10,
-  max: 1.0,
-  gradient: {
-    0.0: '#0066ff',
-    0.25: '#00ffff',
-    0.5: '#00ff88',
-    0.75: '#ffcc00',
-    1.0: '#ff3333',
+function loadAmapSdk() {
+  if (window.AMap) {
+    return Promise.resolve(window.AMap)
   }
+
+  if (amapLoadPromise) {
+    return amapLoadPromise
+  }
+
+  amapLoadPromise = new Promise((resolve, reject) => {
+    if (!AMAP_JS_KEY) {
+      reject(new Error('缺少 VITE_AMAP_JS_KEY'))
+      return
+    }
+
+    if (AMAP_SECURITY_CODE) {
+      window._AMapSecurityConfig = { securityJsCode: AMAP_SECURITY_CODE }
+    }
+
+    const existing = document.getElementById('amap-jsapi')
+    if (existing) {
+      existing.addEventListener('load', () => resolve(window.AMap), { once: true })
+      existing.addEventListener('error', () => reject(new Error('高德 JS API 加载失败')), { once: true })
+      return
+    }
+
+    const callbackName = `__amapInit_${Date.now()}`
+    window[callbackName] = () => {
+      if (!window.AMap) {
+        reject(new Error('高德脚本已返回，但 window.AMap 不可用'))
+        delete window[callbackName]
+        return
+      }
+      resolve(window.AMap)
+      delete window[callbackName]
+    }
+
+    const script = document.createElement('script')
+    script.id = 'amap-jsapi'
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(AMAP_JS_KEY)}&plugin=AMap.HeatMap&callback=${callbackName}`
+    script.async = true
+    script.onerror = () => {
+      reject(new Error('高德 JS API 脚本加载失败'))
+      delete window[callbackName]
+    }
+    document.head.appendChild(script)
+  })
+
+  return amapLoadPromise
+}
+
+function toGcjPoint(coords = []) {
+  if (!Array.isArray(coords) || coords.length < 2) return null
+  const [lng, lat] = coords
+  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null
+  const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat)
+  return [gcjLng, gcjLat]
 }
 
 function updateHeatmap() {
-  if (!map || !heatLayer) return
-  
-  // 只统计active状态的求救点
-  const heatPoints = alerts.value
-    .filter(sos => sos.status === 'active' && sos.location?.coordinates)
-    .map(sos => {
-      const [lng, lat] = sos.location.coordinates
-      // 权重：中继次数越多，热度越高
-      const weight = Math.min((sos.reportedBy?.length ?? 1) / 5, 1.0)
-      return [lat, lng, weight]
+  if (!map || !heatmap) return
+
+  const data = alerts.value
+    .filter((sos) => sos.status === 'active' && sos.location?.coordinates)
+    .map((sos) => {
+      const point = toGcjPoint(sos.location.coordinates)
+      if (!point) return null
+      const weight = Math.min((sos.reportedBy?.length ?? 1) / 5, 1)
+      return {
+        lng: point[0],
+        lat: point[1],
+        count: Math.max(1, Math.round(weight * 100)),
+      }
     })
-  
-  heatLayer.setLatLngs(heatPoints)
+    .filter(Boolean)
+
+  heatmap.setDataSet({ data, max: 100 })
 }
 
-function mkIcon() {
-  return L.divIcon({
-    className: '',
-    html: `<div class="sos-marker">
-             <div class="sos-dot"></div>
-             <div class="sos-ring"></div>
-             <div class="sos-ring r2"></div>
-           </div>`,
-    iconSize:    [30, 30],
-    iconAnchor:  [15, 15],
-    popupAnchor: [0, -18],
-  })
+function createMarkerElement() {
+  const el = document.createElement('div')
+  el.className = 'sos-marker-wrap'
+  el.innerHTML = `
+    <div class="sos-marker">
+      <div class="sos-dot"></div>
+      <div class="sos-ring"></div>
+      <div class="sos-ring r2"></div>
+    </div>
+  `
+  return el
 }
 
 function mkPopup(sos) {
-  const bt   = sos.medicalProfile?.bloodTypeDetail !== undefined 
+  const bt = sos.medicalProfile?.bloodTypeDetail !== undefined
     ? BLOOD_LABELS[sos.medicalProfile.bloodTypeDetail] ?? '未知'
     : BLOOD_LABELS[sos.bloodType] ?? '未知'
   const time = new Date(sos.timestamp).toLocaleString('zh-CN')
   const relay = sos.reportedBy?.length ?? 1
   const mp = sos.medicalProfile || {}
   const [lng, lat] = sos.location?.coordinates || [0, 0]
-  
+
   return `<div class="sos-popup">
     <div class="p-title">⚠ SOS 求救信号</div>
     <div class="p-row"><span>设备 MAC</span><span>${sos.senderMac}</span></div>
@@ -150,40 +199,50 @@ function mkPopup(sos) {
   </div>`
 }
 
-function mkClusterPopup(cluster) {
-  const members = cluster.getAllChildMarkers()
-  const names = members
-    .map(m => m.options.sosData?.medicalProfile?.name || m.options.sosData?.senderMac || '')
-    .filter(Boolean)
-  return `<div class="sos-popup sos-cluster-popup">
-    <div class="p-title">📍 聚合区域 · ${members.length} 人</div>
-    <div class="cluster-names">${names.map(n => `<span class="name-tag">${n}</span>`).join('')}</div>
-  </div>`
+function openInfoWindow(position, content) {
+  if (!map || !infoWindow) return
+  infoWindow.setContent(`<div class="map-info-window">${content}</div>`)
+  infoWindow.open(map, position)
+}
+
+function toggleInfoWindow(targetKey, position, content) {
+  if (!map || !infoWindow) return
+  if (activeInfoTargetKey === targetKey) {
+    infoWindow.close()
+    activeInfoTargetKey = ''
+    return false
+  }
+  activeInfoTargetKey = targetKey
+  openInfoWindow(position, content)
+  return true
 }
 
 function addMarker(sos) {
   const key = `${sos.senderMac}|${sos.timestamp}`
   if (added.has(key) || !map) return
+  const point = toGcjPoint(sos.location?.coordinates)
+  if (!point) return
 
-  const [lng, lat] = sos.location.coordinates
-  const marker = L.marker([lat, lng], { 
-    icon: mkIcon(),
-    sosData: sos
+  const contentEl = createMarkerElement()
+  const marker = new AMapLib.Marker({
+    position: point,
+    anchor: 'center',
+    content: contentEl,
+    offset: new AMapLib.Pixel(-15, -15),
+    zIndex: 130,
   })
-    .bindPopup(mkPopup(sos), { className: 'sos-popup-wrap', maxWidth: 260 })
-  
-  markerGroup.addLayer(marker)
-  
-  // 入场爆闪动画
-  setTimeout(() => {
-    const el = marker.getElement()
-    if (el) el.classList.add('flash-in')
-  }, 50)
-  
-  // 记录标记引用
-  added.set(key, marker)
-  
-  // 定时检查标记是否过期变旧
+  marker.setExtData({ sosData: sos })
+  marker.on('click', () => {
+    const opened = toggleInfoWindow(`sos:${key}`, point, mkPopup(sos))
+    if (opened) {
+      const nextZoom = Math.max(map.getZoom() || 5, 15)
+      map.setZoomAndCenter(nextZoom, point, false, 500)
+    }
+  })
+  marker.setMap(map)
+
+  setTimeout(() => contentEl.classList.add('flash-in'), 50)
+  added.set(key, { marker, el: contentEl, sosData: sos })
   scheduleStaleCheck()
 }
 
@@ -194,24 +253,23 @@ function scheduleStaleCheck() {
 
 function updateStaleMarkers() {
   const now = Date.now()
-  for (const [key, marker] of added) {
-    const ts = marker.options.sosData?.timestamp
-    if (!ts) continue
+  for (const [, entry] of added) {
+    const ts = entry.sosData?.timestamp
+    if (!ts || !entry.el) continue
     const age = now - new Date(ts).getTime()
-    const el = marker.getElement()
-    if (!el) continue
-    if (age > STALE_THRESHOLD) {
-      el.classList.add('stale')
-    } else {
-      el.classList.remove('stale')
-    }
+    if (age > STALE_THRESHOLD) entry.el.classList.add('stale')
+    else entry.el.classList.remove('stale')
   }
-  // 继续轮询
   scheduleStaleCheck()
 }
 
+function clearAllRouteOverlays() {
+  routeOverlays.forEach((overlay) => overlay?.setMap?.(null))
+  routeOverlays = []
+}
+
 function clearRouteOverlay() {
-  routeLayerGroup?.clearLayers()
+  clearAllRouteOverlays()
   currentRouteState.value = null
   activeRouteStepIndex.value = -1
   isRouteHudCompact.value = false
@@ -222,45 +280,42 @@ function toggleRouteHudCompact() {
   isRouteHudCompact.value = !isRouteHudCompact.value
 }
 
+function setHeatmapRouteMode(active) {
+  const canvas = mapEl.value?.querySelector('.amap-heatmap-layer')
+  if (!canvas) return
+  canvas.style.opacity = active ? '0.18' : '1'
+  canvas.style.filter = active ? 'saturate(0.65)' : 'saturate(1)'
+  canvas.style.transition = 'opacity 180ms ease, filter 180ms ease'
+}
+
 function decodeStepPolyline(step) {
-  const segments = String(step?.polyline || '').split(';').filter(Boolean)
-  const points = []
-  let lastKey = null
-
-  segments.forEach((pair) => {
-    const [lng, lat] = pair.split(',').map(Number)
-    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
-    const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
-    if (key === lastKey) return
-    lastKey = key
-    points.push([lat, lng])
-  })
-
-  return points
+  return String(step?.polyline || '')
+    .split(';')
+    .filter(Boolean)
+    .map((pair) => pair.split(',').map(Number))
+    .filter((point) => point.length === 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]))
 }
 
 function decodeRoutePolyline(route) {
   const steps = Array.isArray(route?.fullSteps) ? route.fullSteps : []
   const points = []
   let lastKey = null
-
   steps.forEach((step) => {
-    decodeStepPolyline(step).forEach(([lat, lng]) => {
-      const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
+    decodeStepPolyline(step).forEach(([lng, lat]) => {
+      const key = `${lng.toFixed(6)},${lat.toFixed(6)}`
       if (key === lastKey) return
       lastKey = key
-      points.push([lat, lng])
+      points.push([lng, lat])
     })
   })
-
   return points
 }
 
 function calcMeters(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return 0
   const toRad = (deg) => (deg * Math.PI) / 180
-  const [lat1, lng1] = a
-  const [lat2, lng2] = b
+  const [lng1, lat1] = a
+  const [lng2, lat2] = b
   const dLat = toRad(lat2 - lat1)
   const dLng = toRad(lng2 - lng1)
   const lat1Rad = toRad(lat1)
@@ -270,144 +325,183 @@ function calcMeters(a, b) {
   return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
 }
 
-function setHeatmapRouteMode(active) {
-  if (!heatLayer?._canvas) return
-  heatLayer._canvas.style.opacity = active ? '0.18' : '1'
-  heatLayer._canvas.style.filter = active ? 'saturate(0.65)' : 'saturate(1)'
-  heatLayer._canvas.style.transition = 'opacity 180ms ease, filter 180ms ease'
+function addOverlay(overlay) {
+  overlay.setMap(map)
+  routeOverlays.push(overlay)
+  return overlay
 }
 
-function makeEndpointIcon(kind, label) {
-  return L.divIcon({
-    className: '',
-    html: `<div class="route-endpoint ${kind}">
+function makeEndpointMarker(kind, label, position) {
+  return new AMapLib.Marker({
+    position,
+    anchor: 'center',
+    offset: new AMapLib.Pixel(-18, -17),
+    zIndex: 1200,
+    content: `<div class="route-endpoint ${kind}">
       <div class="route-endpoint-badge">${kind === 'start' ? 'SOS' : '医'}</div>
       <div class="route-endpoint-label">${label}</div>
     </div>`,
-    iconSize: [120, 34],
-    iconAnchor: [18, 17],
-    popupAnchor: [0, -16],
   })
 }
 
-function makeAnchorIcon(kind) {
-  return L.divIcon({
-    className: '',
-    html: `<div class="route-anchor ${kind}"></div>`,
-    iconSize: [12, 12],
-    iconAnchor: [6, 6],
+function makeAnchorMarker(kind, position) {
+  return new AMapLib.Marker({
+    position,
+    anchor: 'center',
+    offset: new AMapLib.Pixel(-6, -6),
+    zIndex: 1000,
+    content: `<div class="route-anchor ${kind}"></div>`,
   })
 }
 
-function makeTurnIcon(index, active = false) {
-  return L.divIcon({
-    className: '',
-    html: `<div class="route-turn-marker ${active ? 'active' : ''}">${index + 1}</div>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
+function makeTurnMarker(index, active, position, step) {
+  const marker = new AMapLib.Marker({
+    position,
+    anchor: 'center',
+    offset: new AMapLib.Pixel(-12, -12),
+    zIndex: 1100 + index,
+    content: `<div class="route-turn-marker ${active ? 'active' : ''}">${index + 1}</div>`,
   })
+  marker.on('click', () => {
+    openInfoWindow(position, `<div class="sos-popup route-popup"><div class="p-title">步骤 ${index + 1}</div><div class="p-row"><span>${step.instruction || ''}</span><span>${step.distance || 0}m</span></div></div>`)
+    highlightRouteStep(index)
+  })
+  return marker
 }
 
-function renderTurnMarkers(route) {
-  const steps = Array.isArray(route?.fullSteps) ? route.fullSteps.slice(0, 6) : []
-  steps.forEach((step, index) => {
-    const stepPoints = decodeStepPolyline(step)
-    if (stepPoints.length === 0) return
-    const marker = L.marker(stepPoints[stepPoints.length - 1], {
-      icon: makeTurnIcon(index, activeRouteStepIndex.value === index),
-      zIndexOffset: 900 + index,
-    })
-      .bindPopup(`<div class="sos-popup"><div class="p-title">步骤 ${index + 1}</div><div class="p-row"><span>${step.instruction || ''}</span><span>${step.distance || 0}m</span></div></div>`)
-      .on('click', () => highlightRouteStep(index))
-      .addTo(routeLayerGroup)
-    marker.stepIndex = index
-  })
+function fitView(overlays, options = {}) {
+  if (!map || !overlays.length) return
+
+  const {
+    padding = [120, 120, 120, 120],
+    minZoom = 0,
+    extraZoom = 0,
+  } = options
+
+  map.setFitView(overlays, false, padding)
+
+  const currentZoom = Number(map.getZoom?.() || 0)
+  if (!Number.isFinite(currentZoom)) return
+
+  const targetZoom = Math.min(18, Math.max(currentZoom + extraZoom, minZoom))
+  if (targetZoom > currentZoom) {
+    map.setZoom(targetZoom, false, 350)
+  }
+}
+
+function getRouteFocusOptions(route) {
+  const distance = Number(route?.distanceMeters || 0)
+
+  if (distance > 0 && distance <= 2000) {
+    return {
+      padding: [130, 110, 110, 110],
+      minZoom: 15,
+      extraZoom: 1,
+    }
+  }
+
+  if (distance > 0 && distance <= 5000) {
+    return {
+      padding: [130, 110, 110, 110],
+      minZoom: 14,
+      extraZoom: 1,
+    }
+  }
+
+  return {
+    padding: [120, 120, 120, 120],
+    minZoom: 12,
+    extraZoom: 0,
+  }
 }
 
 function rebuildRouteOverlay(detail, options = {}) {
-  if (!map || !routeLayerGroup || !detail?.route) return
-
+  if (!map || !detail?.route) return
   const { focusBounds = true } = options
+
   currentRouteState.value = detail
   setHeatmapRouteMode(true)
-  routeLayerGroup.clearLayers()
+  clearAllRouteOverlays()
 
-  const points = decodeRoutePolyline(detail.route)
-  if (points.length < 2) return
+  const routePoints = decodeRoutePolyline(detail.route)
+  if (routePoints.length < 2) return
 
-  const routeShadow = L.polyline(points, {
-    color: '#031623',
-    weight: 12,
-    opacity: 0.94,
-    lineJoin: 'round',
+  const shadow = addOverlay(new AMapLib.Polyline({
+    path: routePoints,
+    strokeColor: '#031623',
+    strokeWeight: 12,
     lineCap: 'round',
-  }).addTo(routeLayerGroup)
-
-  const routeGlow = L.polyline(points, {
-    color: '#23e7ff',
-    weight: 6,
-    opacity: 0.98,
     lineJoin: 'round',
+    zIndex: 800,
+  }))
+
+  const line = addOverlay(new AMapLib.Polyline({
+    path: routePoints,
+    strokeColor: '#23e7ff',
+    strokeWeight: 6,
     lineCap: 'round',
-  }).addTo(routeLayerGroup)
+    lineJoin: 'round',
+    zIndex: 900,
+  }))
 
-  const startCoords = Array.isArray(detail.route.sourceCoordinates)
-    ? [detail.route.sourceCoordinates[1], detail.route.sourceCoordinates[0]]
-    : points[0]
-  const endCoords = Array.isArray(detail.route.destinationCoordinates)
-    ? [detail.route.destinationCoordinates[1], detail.route.destinationCoordinates[0]]
-    : points[points.length - 1]
-  const routeStart = points[0]
-  const routeEnd = points[points.length - 1]
+  const startCoords = toGcjPoint(detail.route.sourceCoordinates) || routePoints[0]
+  const endCoords = toGcjPoint(detail.route.destinationCoordinates) || routePoints[routePoints.length - 1]
+  const routeStart = routePoints[0]
+  const routeEnd = routePoints[routePoints.length - 1]
 
-  L.marker(startCoords, {
-    icon: makeEndpointIcon('start', detail.name || detail.mac || '求救点'),
-    zIndexOffset: 1200,
-  })
-    .bindPopup(
+  const startMarker = makeEndpointMarker('start', detail.name || detail.mac || '求救点', startCoords)
+  startMarker.on('click', () => {
+    toggleInfoWindow(
+      `route-start:${detail.mac || detail.name || 'unknown'}`,
+      startCoords,
       `<div class="sos-popup route-popup"><div class="p-title">求救点</div><div class="p-row"><span>${detail.name || detail.mac || ''}</span><span>${detail.address || ''}</span></div></div>`,
-      { className: 'route-popup-wrap', maxWidth: 320 },
     )
-    .addTo(routeLayerGroup)
-
-  L.marker(endCoords, {
-    icon: makeEndpointIcon('end', detail.hospitalName || '目的医院'),
-    zIndexOffset: 1200,
   })
-    .bindPopup(
+  addOverlay(startMarker)
+
+  const endMarker = makeEndpointMarker('end', detail.hospitalName || '目的医院', endCoords)
+  endMarker.on('click', () => {
+    toggleInfoWindow(
+      `route-end:${detail.hospitalName || 'hospital'}:${detail.route.distanceKm || ''}`,
+      endCoords,
       `<div class="sos-popup route-popup"><div class="p-title">目的医院</div><div class="p-row"><span>${detail.hospitalName || '医院'}</span><span>${detail.route.distanceKm || ''} km</span></div></div>`,
-      { className: 'route-popup-wrap', maxWidth: 320 },
     )
-    .addTo(routeLayerGroup)
+  })
+  addOverlay(endMarker)
 
   if (calcMeters(startCoords, routeStart) > 20) {
-    L.polyline([startCoords, routeStart], {
-      color: '#00f0b8',
-      weight: 2,
-      opacity: 0.8,
-      dashArray: '6, 6',
-    }).addTo(routeLayerGroup)
-    L.marker(routeStart, { icon: makeAnchorIcon('start'), interactive: false }).addTo(routeLayerGroup)
+    addOverlay(new AMapLib.Polyline({
+      path: [startCoords, routeStart],
+      strokeColor: '#00f0b8',
+      strokeWeight: 2,
+      strokeStyle: 'dashed',
+      lineDash: [6, 6],
+      zIndex: 850,
+    }))
+    addOverlay(makeAnchorMarker('start', routeStart))
   }
 
   if (calcMeters(routeEnd, endCoords) > 20) {
-    L.polyline([routeEnd, endCoords], {
-      color: '#ffd966',
-      weight: 2,
-      opacity: 0.8,
-      dashArray: '6, 6',
-    }).addTo(routeLayerGroup)
-    L.marker(routeEnd, { icon: makeAnchorIcon('end'), interactive: false }).addTo(routeLayerGroup)
+    addOverlay(new AMapLib.Polyline({
+      path: [routeEnd, endCoords],
+      strokeColor: '#ffd966',
+      strokeWeight: 2,
+      strokeStyle: 'dashed',
+      lineDash: [6, 6],
+      zIndex: 850,
+    }))
+    addOverlay(makeAnchorMarker('end', routeEnd))
   }
 
-  renderTurnMarkers(detail.route)
+  const steps = Array.isArray(detail.route?.fullSteps) ? detail.route.fullSteps.slice(0, 6) : []
+  steps.forEach((step, index) => {
+    const stepPoints = decodeStepPolyline(step)
+    if (!stepPoints.length) return
+    addOverlay(makeTurnMarker(index, activeRouteStepIndex.value === index, stepPoints[stepPoints.length - 1], step))
+  })
 
   if (focusBounds) {
-    map.fitBounds(routeShadow.getBounds(), {
-      paddingTopLeft: [40, 120],
-      paddingBottomRight: [40, 60],
-      maxZoom: 16,
-    })
+    fitView([shadow, line], getRouteFocusOptions(detail.route))
   }
 
   if (activeRouteStepIndex.value >= 0) {
@@ -416,16 +510,15 @@ function rebuildRouteOverlay(detail, options = {}) {
 }
 
 function showRouteOverlay(detail) {
-  if (!map || !routeLayerGroup || !detail?.route) return
+  if (!detail?.route) return
   activeRouteStepIndex.value = -1
   rebuildRouteOverlay(detail)
 }
 
 function highlightRouteStep(stepIndex, options = {}) {
   const detail = currentRouteState.value
-  const route = detail?.route
-  const steps = Array.isArray(route?.fullSteps) ? route.fullSteps : []
-  if (!route || stepIndex == null || stepIndex < 0 || stepIndex >= steps.length) {
+  const steps = Array.isArray(detail?.route?.fullSteps) ? detail.route.fullSteps : []
+  if (!detail?.route || !Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= steps.length) {
     activeRouteStepIndex.value = -1
     if (detail) rebuildRouteOverlay(detail, { focusBounds: false })
     return
@@ -433,37 +526,37 @@ function highlightRouteStep(stepIndex, options = {}) {
 
   const { fly = true, rerender = true } = options
   activeRouteStepIndex.value = stepIndex
-  if (rerender && detail) {
+  if (rerender) {
     rebuildRouteOverlay(detail, { focusBounds: false })
   }
 
   const stepPoints = decodeStepPolyline(steps[stepIndex])
   if (stepPoints.length < 2) return
 
-  const emphasisShadow = L.polyline(stepPoints, {
-    color: '#ffffff',
-    weight: 12,
-    opacity: 0.14,
+  const shadow = addOverlay(new AMapLib.Polyline({
+    path: stepPoints,
+    strokeColor: '#ffffff',
+    strokeOpacity: 0.15,
+    strokeWeight: 12,
     lineCap: 'round',
     lineJoin: 'round',
-  }).addTo(routeLayerGroup)
+    zIndex: 1150,
+  }))
 
-  const emphasisLine = L.polyline(stepPoints, {
-    color: '#ffea5b',
-    weight: 7,
-    opacity: 1,
+  const line = addOverlay(new AMapLib.Polyline({
+    path: stepPoints,
+    strokeColor: '#ffea5b',
+    strokeWeight: 7,
     lineCap: 'round',
     lineJoin: 'round',
-  }).addTo(routeLayerGroup)
-
-  emphasisShadow.bringToFront()
-  emphasisLine.bringToFront()
+    zIndex: 1200,
+  }))
 
   if (fly) {
-    map.fitBounds(emphasisLine.getBounds(), {
-      paddingTopLeft: [50, 140],
-      paddingBottomRight: [50, 80],
-      maxZoom: 17,
+    fitView([shadow, line], {
+      padding: [120, 120, 120, 120],
+      minZoom: 16,
+      extraZoom: 1,
     })
   }
 
@@ -487,109 +580,10 @@ function focusWholeRoute() {
   }))
 }
 
-async function loadProvinceBoundary() {
-  try {
-    const res = await fetch(PROVINCE_BOUNDARY_URL)
-    const geojson = await res.json()
-    provinceLayer = L.geoJSON(geojson, {
-      style: {
-        color: 'rgba(0, 180, 255, 0.35)',
-        weight: 1.2,
-        fillColor: 'transparent',
-        dashArray: '4, 6',
-      },
-    }).addTo(map)
-  } catch (e) {
-    console.warn('[Map] 省份边界加载失败:', e)
-  }
-}
-
-// watchEffect：mapReady + alerts 双重依赖
-// 每次 alerts 有新项或地图就绪时重跑，dedup 由 added Map 保证
-watchEffect(() => {
+function applyMarkerFilterState() {
   if (!mapReady.value) return
-  alerts.value.forEach(addMarker)
-  updateHeatmap()
-})
-
-onMounted(() => {
-  map = L.map(mapEl.value, {
-    center: [35.86, 104.19],
-    zoom: 5,
-    zoomControl: false,
-    attributionControl: false,
-    fadeAnimation: true,
-    zoomAnimation: true,
-    markerZoomAnimation: false,
-  })
-
-  // 地图容器底色设为深色，避免瓦片加载间隙露白/露黑
-  mapEl.value.style.background = '#0a0e17'
-
-  const tileLayer = L.tileLayer(TILE, {
-    maxZoom: 19,
-    maxNativeZoom: 19,
-    subdomains: 'abcd',
-    updateWhenIdle: false,
-    updateWhenZooming: true,
-    updateInterval: 200,
-    keepBuffer: 4,
-    fadeAnimation: true,
-  }).addTo(map)
-  L.control.zoom({ position: 'bottomright' }).addTo(map)
-  
-  // 初始化热力图层
-  heatLayer = L.heatLayer([], { ...HEAT_CONFIG }).addTo(map)
-  setHeatmapRouteMode(false)
-  
-  // 初始化标记聚类组
-  markerGroup = L.markerClusterGroup({
-    maxClusterRadius: 40,        // 减小聚类半径，减少计算量
-    spiderfyOnMaxZoom: true,
-    showCoverageOnHover: false,
-    zoomToBoundsOnClick: true,
-    disableClusteringAtZoom: 15, // 超过此zoom级别自动解散
-    iconCreateFunction: function(cluster) {
-      const count = cluster.getChildCount()
-      let size = 'small'
-      if (count > 10) size = 'large'
-      else if (count > 5) size = 'medium'
-      return L.divIcon({
-        html: `<div class="cluster-icon ${size}">${count}</div>`,
-        className: 'cluster-wrapper',
-        iconSize: L.point(40, 40)
-      })
-    }
-  })
-  markerGroup.on('clusterclick', function(a) {
-    if (map.getZoom() === map.getMaxZoom()) {
-      a.layer.bindPopup(mkClusterPopup(a.layer), { className: 'sos-popup-wrap', maxWidth: 320 }).openPopup()
-    }
-  })
-  map.addLayer(markerGroup)
-  routeLayerGroup = L.layerGroup().addTo(map)
-
-  mapReady.value = true
-  
-  // 加载省份边界
-  loadProvinceBoundary()
-})
-
-onUnmounted(() => {
-  map?.remove()
-  window.removeEventListener('map-flyto', handleFlyTo)
-  window.removeEventListener('map-show-route', handleShowRoute)
-  window.removeEventListener('map-flyto-area', handleFlyToArea)
-  window.removeEventListener('map-highlight-route-step', handleHighlightRouteStep)
-  window.removeEventListener('map-focus-route', handleFocusRoute)
-})
-
-// 监听搜索状态变化，高亮/淡化标记
-watch(() => searchState.activeKeys, () => {
-  if (!mapReady.value) return
-  for (const [, marker] of added) {
-    const key = `${marker.options.sosData?.senderMac}|${marker.options.sosData?.timestamp}`
-    const el = marker.getElement()
+  for (const [key, entry] of added) {
+    const el = entry.el
     if (!el) continue
     if (searchState.hasFilter && !searchState.activeKeys.has(key)) {
       el.classList.add('dimmed')
@@ -601,32 +595,42 @@ watch(() => searchState.activeKeys, () => {
       el.classList.remove('dimmed', 'highlighted')
     }
   }
-}, { deep: true })
+}
 
-// 监听自定义 fly-to 事件
+function flyToSos(sos) {
+  if (!map || !sos?.location?.coordinates) return
+  const point = toGcjPoint(sos.location.coordinates)
+  if (!point) return
+  map.setZoomAndCenter(15, point, false, 500)
+
+  const key = `${sos.senderMac}|${sos.timestamp}`
+  const entry = added.get(key)
+  if (entry?.marker) {
+    openInfoWindow(point, mkPopup(entry.sosData))
+  }
+}
+
 function handleFlyTo(e) {
   flyToSos(e.detail)
 }
-window.addEventListener('map-flyto', handleFlyTo)
 
 function handleShowRoute(e) {
   showRouteOverlay(e.detail)
 }
-window.addEventListener('map-show-route', handleShowRoute)
 
 function handleHighlightRouteStep(e) {
-  const stepIndex = Number(e.detail?.stepIndex)
   const detail = e.detail?.routeOverlay
   if (!currentRouteState.value && detail?.route) {
     showRouteOverlay(detail)
   }
+
+  const stepIndex = Number(e.detail?.stepIndex)
   if (!Number.isInteger(stepIndex) || stepIndex < 0) {
     focusWholeRoute()
     return
   }
   highlightRouteStep(stepIndex)
 }
-window.addEventListener('map-highlight-route-step', handleHighlightRouteStep)
 
 function handleFocusRoute(e) {
   const detail = e?.detail
@@ -636,34 +640,98 @@ function handleFocusRoute(e) {
   }
   focusWholeRoute()
 }
-window.addEventListener('map-focus-route', handleFocusRoute)
 
-// 监听飞入风险区域事件
 function handleFlyToArea(e) {
   if (!map) return
-  const { center, count } = e.detail
-  const [lng, lat] = center
+  const center = Array.isArray(e.detail?.center) ? e.detail.center : null
+  if (!center || center.length < 2) return
+  const point = toGcjPoint(center)
+  if (!point) return
+  const count = Number(e.detail?.count || 0)
   const zoom = count >= 8 ? 10 : count >= 5 ? 11 : 12
-  map.flyTo([lat, lng], zoom, { duration: 1.2 })
+  map.setZoomAndCenter(zoom, point, false, 800)
 }
-window.addEventListener('map-flyto-area', handleFlyToArea)
 
-// 暴露给父组件：飞到指定求救点位置并打开弹窗
-function flyToSos(sos) {
-  if (!map || !sos?.location?.coordinates) return
-  const [lng, lat] = sos.location.coordinates
-  // 找到对应 marker
-  for (const [, marker] of added) {
-    if (marker.options.sosData?.senderMac === sos.senderMac &&
-        marker.options.sosData?.timestamp === sos.timestamp) {
-      map.flyTo([lat, lng], 14, { duration: 1.2 })
-      setTimeout(() => marker.openPopup(), 1300)
-      return
-    }
+watchEffect(() => {
+  if (!mapReady.value) return
+  alerts.value.forEach(addMarker)
+  updateHeatmap()
+})
+
+watch(() => searchState.activeKeys, () => {
+  applyMarkerFilterState()
+}, { deep: true })
+
+onMounted(async () => {
+  try {
+    AMapLib = await loadAmapSdk()
+  } catch (error) {
+    console.error('[Map] 高德地图加载失败:', error.message)
+    mapError.value = error.message
+    return
   }
-  // 没找到精确匹配，飞到坐标处
-  map.flyTo([lat, lng], 12, { duration: 1.2 })
-}
+
+  infoWindow = new AMapLib.InfoWindow({
+    isCustom: true,
+    autoMove: true,
+    offset: new AMapLib.Pixel(0, -28),
+    content: '',
+  })
+
+  map = new AMapLib.Map(mapEl.value, {
+    center: toGcjPoint([104.19, 35.86]),
+    zoom: 5,
+    mapStyle: AMAP_MAP_STYLE,
+    viewMode: '2D',
+    features: ['bg', 'road', 'building', 'point'],
+    showLabel: true,
+    resizeEnable: true,
+    jogEnable: false,
+    pitchEnable: false,
+    rotateEnable: false,
+  })
+
+  infoWindow.on('close', () => {
+    activeInfoTargetKey = ''
+  })
+
+  heatmap = new AMapLib.HeatMap(map, {
+    radius: 35,
+    opacity: [0, 0.9],
+    gradient: {
+      0.0: '#0066ff',
+      0.25: '#00ffff',
+      0.5: '#00ff88',
+      0.75: '#ffcc00',
+      1.0: '#ff3333',
+    },
+  })
+
+  mapReady.value = true
+  mapError.value = ''
+  setHeatmapRouteMode(false)
+
+  window.addEventListener('map-flyto', handleFlyTo)
+  window.addEventListener('map-show-route', handleShowRoute)
+  window.addEventListener('map-highlight-route-step', handleHighlightRouteStep)
+  window.addEventListener('map-focus-route', handleFocusRoute)
+  window.addEventListener('map-flyto-area', handleFlyToArea)
+})
+
+onUnmounted(() => {
+  if (staleTimer) clearTimeout(staleTimer)
+  clearAllRouteOverlays()
+  window.removeEventListener('map-flyto', handleFlyTo)
+  window.removeEventListener('map-show-route', handleShowRoute)
+  window.removeEventListener('map-highlight-route-step', handleHighlightRouteStep)
+  window.removeEventListener('map-focus-route', handleFocusRoute)
+  window.removeEventListener('map-flyto-area', handleFlyToArea)
+  map?.destroy?.()
+  map = null
+  infoWindow = null
+  heatmap = null
+  added.clear()
+})
 
 defineExpose({ flyToSos })
 </script>
@@ -677,6 +745,52 @@ defineExpose({ flyToSos })
   overflow: hidden;
   border: 1px solid rgba(0, 200, 255, 0.2);
   box-shadow: inset 0 0 30px rgba(0, 10, 30, 0.6);
+}
+
+.map-wrap::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 18%, rgba(0, 170, 255, 0.08), transparent 28%),
+    radial-gradient(circle at 82% 78%, rgba(0, 255, 217, 0.06), transparent 30%),
+    linear-gradient(180deg, rgba(2, 10, 18, 0.06), rgba(2, 10, 18, 0.14));
+}
+
+.map-error-panel {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  z-index: 980;
+  width: min(420px, calc(100% - 32px));
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 107, 107, 0.28);
+  background: linear-gradient(180deg, rgba(33, 8, 12, 0.96), rgba(18, 4, 8, 0.96));
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.34);
+}
+
+.map-error-title {
+  color: #ff8d8d;
+  font-size: 0.88rem;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+
+.map-error-body {
+  color: #ffe6e6;
+  font-size: 0.68rem;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.map-error-hint {
+  margin-top: 8px;
+  color: rgba(255, 219, 219, 0.72);
+  font-size: 0.62rem;
+  line-height: 1.45;
 }
 
 .route-hud {
@@ -693,8 +807,8 @@ defineExpose({ flyToSos })
   padding: 12px 14px;
   border-radius: 14px;
   border: 1px solid rgba(0, 229, 255, 0.16);
-  background: linear-gradient(180deg, rgba(3, 19, 32, 0.95), rgba(1, 10, 22, 0.92));
-  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+  background: linear-gradient(180deg, rgba(4, 20, 34, 0.96), rgba(3, 14, 26, 0.95));
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(12px);
 }
 
@@ -734,10 +848,6 @@ defineExpose({ flyToSos })
   cursor: pointer;
 }
 
-.route-hud-icon-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
 .route-hud-title {
   color: #9ff6ff;
   font-size: 0.78rem;
@@ -771,8 +881,8 @@ defineExpose({ flyToSos })
 .route-hud-metric {
   padding: 8px;
   border-radius: 10px;
-  background: rgba(6, 28, 45, 0.82);
-  border: 1px solid rgba(0, 229, 255, 0.08);
+  background: rgba(7, 32, 50, 0.9);
+  border: 1px solid rgba(0, 229, 255, 0.12);
 }
 
 .route-hud-label {
@@ -791,7 +901,7 @@ defineExpose({ flyToSos })
   margin-top: 10px;
   padding: 9px 10px;
   border-radius: 10px;
-  background: rgba(10, 35, 57, 0.74);
+  background: rgba(9, 37, 58, 0.88);
   color: rgba(227, 248, 255, 0.88);
   font-size: 0.64rem;
   line-height: 1.5;
@@ -825,129 +935,176 @@ defineExpose({ flyToSos })
   font-size: 0.56rem;
   line-height: 1.45;
 }
-/* 扫描线特效 */
+
 .scan-line {
   position: absolute;
-  left: 0; right: 0;
+  left: 0;
+  right: 0;
   height: 2px;
   background: linear-gradient(90deg, transparent, rgba(0, 229, 255, 0.4), transparent);
   animation: scan-line 6s linear infinite;
   z-index: 800;
   pointer-events: none;
 }
+
+@keyframes scan-line {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
 </style>
 
-<!-- 全局样式：聚类标记 + 弹窗 -->
 <style>
-/* 聚类图标容器 */
-.cluster-wrapper {
-  background: none;
-  border: none;
+.map-info-window {
+  min-width: 260px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(6, 18, 31, 0.98), rgba(4, 13, 24, 0.98));
+  border: 1px solid rgba(0, 229, 255, 0.16);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(16px);
 }
 
-/* 聚类圆形图标 */
-.cluster-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.sos-marker-wrap {
+  transform-origin: center center;
+  transition: opacity 0.2s ease, filter 0.2s ease, transform 0.2s ease;
+}
+
+.sos-marker-wrap.flash-in {
+  animation: marker-flash-in 500ms ease;
+}
+
+.sos-marker-wrap.stale {
+  filter: grayscale(0.35);
+  opacity: 0.65;
+}
+
+.sos-marker-wrap.dimmed {
+  opacity: 0.25;
+  filter: grayscale(0.6);
+}
+
+.sos-marker-wrap.highlighted {
+  transform: scale(1.1);
+}
+
+.sos-marker {
+  position: relative;
+  width: 30px;
+  height: 30px;
+}
+
+.sos-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  color: #fff;
+  background: #ff3b30;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 12px rgba(255, 59, 48, 0.85);
+}
+
+.sos-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  border: 2px solid rgba(0, 255, 235, 0.45);
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  animation: sos-pulse 2.4s ease-out infinite;
+}
+
+.sos-ring.r2 {
+  animation-delay: 1.2s;
+}
+
+@keyframes sos-pulse {
+  0% { transform: translate(-50%, -50%) scale(0.6); opacity: 0.9; }
+  100% { transform: translate(-50%, -50%) scale(1.55); opacity: 0; }
+}
+
+@keyframes marker-flash-in {
+  0% { transform: scale(0.6); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.sos-popup {
+  min-width: 260px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  color: #effbff;
+  font-family: 'Courier New', monospace;
+  background: linear-gradient(180deg, rgba(5, 18, 31, 0.98), rgba(3, 12, 23, 0.98));
+}
+
+.sos-popup .p-title {
+  color: #9ff6ff;
+  font-size: 0.92rem;
   font-weight: bold;
-  font-family: 'Courier New', monospace;
-  font-size: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.6);
-  box-shadow: 0 0 12px rgba(0, 200, 255, 0.5);
+  margin-bottom: 10px;
+  letter-spacing: 0.04em;
 }
 
-.cluster-icon.small {
-  width: 30px; height: 30px;
-  background: radial-gradient(circle, #00ccff, #0066aa);
-  font-size: 12px;
-}
-
-.cluster-icon.medium {
-  width: 40px; height: 40px;
-  background: radial-gradient(circle, #ffcc00, #ff8800);
-  font-size: 14px;
-}
-
-.cluster-icon.large {
-  width: 50px; height: 50px;
-  background: radial-gradient(circle, #ff3333, #cc0000);
-  font-size: 16px;
-  animation: cluster-pulse 2s ease-in-out infinite;
-}
-
-@keyframes cluster-pulse {
-  0%, 100% { box-shadow: 0 0 12px rgba(255, 51, 51, 0.5); }
-  50% { box-shadow: 0 0 24px rgba(255, 51, 51, 0.8); }
-}
-
-/* 聚类弹窗 */
-.sos-cluster-popup {
-  min-width: 180px;
-  max-width: 320px;
-}
-
-.sos-cluster-popup .cluster-names {
+.sos-popup .p-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 0.74rem;
+  line-height: 1.5;
 }
 
-.sos-cluster-popup .name-tag {
-  display: inline-block;
-  padding: 2px 8px;
-  background: rgba(0, 200, 255, 0.15);
-  border: 1px solid rgba(0, 200, 255, 0.3);
-  border-radius: 4px;
-  color: #00e5ff;
-  font-size: 12px;
-  font-family: 'Courier New', monospace;
+.sos-popup .p-row span:first-child {
+  min-width: 56px;
+  color: rgba(177, 220, 235, 0.74);
 }
 
-/* 覆盖 markercluster 默认样式 */
-.marker-cluster-small {
-  background-color: rgba(0, 204, 255, 0.2);
+.sos-popup .p-row span:last-child {
+  flex: 1;
+  color: #f2fbff;
+  text-align: right;
+  word-break: break-word;
 }
-.marker-cluster-small div {
-  background-color: rgba(0, 204, 255, 0.4);
-  color: #fff;
+
+.route-popup .p-title {
+  color: #ff8c8c;
 }
-.marker-cluster-medium {
-  background-color: rgba(255, 204, 0, 0.2);
-}
-.marker-cluster-medium div {
-  background-color: rgba(255, 204, 0, 0.4);
-  color: #fff;
-}
-.marker-cluster-large {
-  background-color: rgba(255, 51, 51, 0.2);
-}
-.marker-cluster-large div {
-  background-color: rgba(255, 51, 51, 0.4);
-  color: #fff;
-}
+
+.hi-green { color: #53ffbc !important; }
+.hi-red { color: #ff8a8a !important; }
+.hi-orange { color: #ffd76d !important; }
+.hi-purple { color: #d9a8ff !important; }
+.hi { color: #8fefff !important; }
+.warn { color: #ffd76d !important; }
+.coord { color: #b5e8ff !important; }
 
 .route-endpoint {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-width: 110px;
-  padding: 4px 10px 4px 4px;
+  min-width: 136px;
+  max-width: 220px;
+  padding: 5px 12px 5px 5px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
-  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(14px);
 }
 
 .route-endpoint.start {
-  background: rgba(255, 84, 84, 0.18);
+  background: linear-gradient(135deg, rgba(80, 18, 24, 0.96), rgba(42, 11, 16, 0.94));
+  border-color: rgba(255, 105, 105, 0.32);
 }
 
 .route-endpoint.end {
-  background: rgba(255, 214, 56, 0.18);
+  background: linear-gradient(135deg, rgba(77, 61, 12, 0.96), rgba(43, 31, 6, 0.94));
+  border-color: rgba(255, 212, 90, 0.34);
 }
 
 .route-endpoint-badge {
@@ -974,13 +1131,15 @@ defineExpose({ flyToSos })
 }
 
 .route-endpoint-label {
-  max-width: 150px;
-  color: #eefcff;
+  max-width: 170px;
+  color: #f6fcff;
   font-size: 12px;
+  font-weight: 600;
   font-family: 'Courier New', monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
 }
 
 .route-anchor {
@@ -1019,49 +1178,5 @@ defineExpose({ flyToSos })
   border-color: rgba(255, 234, 91, 0.95);
   color: #fff4a3;
   box-shadow: 0 0 16px rgba(255, 234, 91, 0.35);
-}
-
-.route-popup-wrap .leaflet-popup-content-wrapper {
-  background: linear-gradient(180deg, rgba(6, 20, 36, 0.98), rgba(3, 13, 25, 0.98));
-  color: #effbff;
-  border: 1px solid rgba(0, 229, 255, 0.18);
-  border-radius: 16px;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
-}
-
-.route-popup-wrap .leaflet-popup-content {
-  margin: 14px 16px;
-  min-width: 220px;
-}
-
-.route-popup-wrap .leaflet-popup-tip {
-  background: rgba(3, 13, 25, 0.98);
-}
-
-.route-popup .p-title {
-  color: #ff7878;
-  font-size: 0.96rem;
-  font-weight: bold;
-  margin-bottom: 10px;
-}
-
-.route-popup .p-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  color: #eef8ff;
-  font-size: 0.78rem;
-  line-height: 1.5;
-}
-
-.route-popup .p-row span:first-child {
-  color: rgba(177, 220, 235, 0.74);
-}
-
-.route-popup .p-row span:last-child {
-  color: #dff4ff;
-  text-align: right;
 }
 </style>

@@ -54,26 +54,8 @@ function gcj02ToWgs84(lng, lat) {
   return [lng - offset.lng, lat - offset.lat];
 }
 
-function convertPolylineGcjToWgs(polyline) {
-  return String(polyline || '')
-    .split(';')
-    .filter(Boolean)
-    .map((pair) => {
-      const [lng, lat] = pair.split(',').map(Number);
-      if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
-        return null;
-      }
-
-      const [wgsLng, wgsLat] = gcj02ToWgs84(lng, lat);
-      return `${wgsLng},${wgsLat}`;
-    })
-    .filter(Boolean)
-    .join(';');
-}
-
 module.exports = {
   gcj02ToWgs84,
   outOfChina,
   wgs84ToGcj02,
-  convertPolylineGcjToWgs,
 };

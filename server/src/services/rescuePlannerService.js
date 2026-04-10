@@ -77,6 +77,7 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
     // ==========================================================================
     // 2. 计算到各医院的路线，找出最近的
     // ==========================================================================
+    const patientAge = parsePatientAge(sosRecord?.medicalProfile?.age);
     const hospitalList = rankHospitalsForPatient(
       hospitals || await resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, DEFAULT_HOSPITALS),
       sosRecord,
@@ -93,6 +94,9 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
         
         hospitalDistances.push({
           ...hospital,
+          emergencyScore: getEmergencyHospitalScore(hospital?.institutionName || hospital?.name || '', hospital?.type || ''),
+          strongSignal: hasStrongEmergencySignal(hospital?.institutionName || hospital?.name || '', hospital?.type || ''),
+          specialtyPenalty: getHospitalSpecialtyPenalty(hospital?.institutionName || hospital?.name || '', patientAge),
           distance: route.distance,
           duration: route.duration,
           route: includeFullSteps ? route : {
@@ -108,6 +112,9 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
         const straightDist = calculateStraightDistance(lng, lat, hospital.lng, hospital.lat);
         hospitalDistances.push({
           ...hospital,
+          emergencyScore: getEmergencyHospitalScore(hospital?.institutionName || hospital?.name || '', hospital?.type || ''),
+          strongSignal: hasStrongEmergencySignal(hospital?.institutionName || hospital?.name || '', hospital?.type || ''),
+          specialtyPenalty: getHospitalSpecialtyPenalty(hospital?.institutionName || hospital?.name || '', patientAge),
           distance: straightDist,
           duration: Math.round(straightDist / 500 * 60), // 假设平均时速30km/h
           error: err.message,
@@ -116,7 +123,7 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
     }
     
     // 按距离排序
-    hospitalDistances.sort((a, b) => a.distance - b.distance);
+    hospitalDistances.sort(compareHospitalsForDispatch);
     const nearestHospital = hospitalDistances[0];
     
     if (DEBUG_MODE && nearestHospital) {
@@ -184,6 +191,12 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
         toHospital: nearestHospital.name,
         sourceCoordinates: [lng, lat],
         destinationCoordinates: [nearestHospital.lng, nearestHospital.lat],
+        destinationMeta: {
+          name: nearestHospital.name,
+          address: nearestHospital.address || '',
+          type: nearestHospital.type || '',
+          source: nearestHospital.source || '',
+        },
         distanceMeters: nearestHospital.route.distance,
         distanceKm: (nearestHospital.route.distance / 1000).toFixed(2),
         estimatedTimeSeconds: nearestHospital.route.duration,
@@ -198,9 +211,15 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
       recommendedHospitals: hospitalDistances.slice(0, maxNearbyHospitals).map(h => ({
         name: h.name,
         location: [h.lng, h.lat],
+        address: h.address || '',
+        type: h.type || '',
+        source: h.source || '',
         distanceMeters: h.distance,
         distanceKm: (h.distance / 1000).toFixed(2),
         estimatedTimeMinutes: Math.ceil(h.duration / 60),
+        emergencyScore: h.emergencyScore,
+        strongSignal: !!h.strongSignal,
+        specialtyPenalty: h.specialtyPenalty || 0,
         hasError: !!h.error,
       })),
       
@@ -640,7 +659,7 @@ function isUsableHospitalCandidate(poi) {
 
   const name = String(poi?.name || '');
   const type = String(poi?.type || '');
-  return getEmergencyHospitalScore(name, type) > 0;
+  return getEmergencyHospitalScore(name, type) > 20;
 }
 
 function isMainHospitalEntityName(name, type = '') {
@@ -671,6 +690,39 @@ function isClearlyNonEmergencyHospital(name, type = '') {
   return /美容|整形|宠物|口腔门诊|门诊部|诊所|体检|健康管理|养生|美容医院|医疗美容|宠物医院/.test(text);
 }
 
+function hasStrongEmergencySignal(name, type = '') {
+  const text = simplifyHospitalName(name);
+  const typeText = String(type || '');
+
+  return (
+    /三级甲等医院|三级医院|急救中心/.test(typeText)
+    || /大学.*附属.*医院|医学院.*附属.*医院|人民医院|中心医院|总医院/.test(text)
+    || /省.*医院|市.*医院/.test(text)
+  );
+}
+
+function getWeakGenericHospitalPenalty(name, type = '') {
+  const text = simplifyHospitalName(name);
+  const typeText = String(type || '');
+  const prefix = text.replace(/医院.*$/, '').trim();
+  const hasWeakGenericName = text.endsWith('医院') && prefix.length <= 3;
+  const hasOnlyGenericType = /综合医院/.test(typeText) && !hasStrongEmergencySignal(text, typeText);
+
+  if (hasWeakGenericName && hasOnlyGenericType) {
+    return 95;
+  }
+
+  if (hasWeakGenericName) {
+    return 55;
+  }
+
+  if (hasOnlyGenericType) {
+    return 35;
+  }
+
+  return 0;
+}
+
 function getEmergencyHospitalScore(name, type = '') {
   const text = simplifyHospitalName(name);
   const typeText = String(type || '');
@@ -686,26 +738,34 @@ function getEmergencyHospitalScore(name, type = '') {
   let score = 0;
 
   if (/三级甲等医院|三级医院/.test(typeText)) {
-    score += 120;
+    score += 180;
   }
-  if (/综合医院|急救中心/.test(typeText)) {
-    score += 100;
+  if (/急救中心/.test(typeText)) {
+    score += 170;
   }
-  if (/大学.*附属.*医院|医学院.*附属.*医院|人民医院|中心医院|总医院/.test(text)) {
-    score += 90;
-  }
-  if (/省.*医院|市.*医院/.test(text)) {
+  if (/综合医院/.test(typeText)) {
     score += 35;
   }
+  if (/大学.*附属.*医院|医学院.*附属.*医院|人民医院|中心医院|总医院/.test(text)) {
+    score += 140;
+  }
+  if (/省.*医院|市.*医院/.test(text)) {
+    score += 90;
+  }
   if (/院区|分院|西区|东区|南区|北区/.test(text)) {
-    score += 15;
+    score += 20;
   }
   if (/专科医院/.test(typeText)) {
-    score -= 15;
+    score -= 40;
   }
   if (/妇幼保健院|儿童医院/.test(text)) {
-    score -= 10;
+    score -= 20;
   }
+  if (/街道|社区/.test(text)) {
+    score -= 20;
+  }
+
+  score -= getWeakGenericHospitalPenalty(text, typeText);
 
   return score;
 }
@@ -817,14 +877,22 @@ function prioritizeMajorHospitals(hospitals) {
         hospital?.institutionName || hospital?.name || '',
         hospital?.type || '',
       ),
+      strongSignal: hasStrongEmergencySignal(
+        hospital?.institutionName || hospital?.name || '',
+        hospital?.type || '',
+      ),
     }))
-    .filter((hospital) => Number.isFinite(hospital.emergencyScore));
+    .filter((hospital) => Number.isFinite(hospital.emergencyScore) && hospital.emergencyScore > 20);
 
-  const strong = scored.filter((hospital) => hospital.emergencyScore >= 100);
+  const strong = scored.filter((hospital) => hospital.strongSignal || hospital.emergencyScore >= 120);
   const usable = strong.length > 0 ? strong : scored.filter((hospital) => hospital.emergencyScore > 0);
   const pool = usable.length > 0 ? usable : scored;
 
   return pool.sort((a, b) => {
+    if (a.strongSignal !== b.strongSignal) {
+      return Number(b.strongSignal) - Number(a.strongSignal);
+    }
+
     if (a.emergencyScore !== b.emergencyScore) {
       return b.emergencyScore - a.emergencyScore;
     }
@@ -837,20 +905,20 @@ function rankHospitalsForPatient(hospitals, sosRecord) {
   const age = parsePatientAge(sosRecord?.medicalProfile?.age);
 
   return [...(Array.isArray(hospitals) ? hospitals : [])].sort((a, b) => {
-    const aScore = getEmergencyHospitalScore(a?.institutionName || a?.name || '', a?.type || '');
-    const bScore = getEmergencyHospitalScore(b?.institutionName || b?.name || '', b?.type || '');
-    const aPenalty = getHospitalAgePenalty(a?.name || '', age);
-    const bPenalty = getHospitalAgePenalty(b?.name || '', age);
-
-    if (aScore !== bScore) {
-      return bScore - aScore;
-    }
-
-    if (aPenalty !== bPenalty) {
-      return aPenalty - bPenalty;
-    }
-
-    return (a?.approxDistance || a?.distance || Infinity) - (b?.approxDistance || b?.distance || Infinity);
+    return compareHospitalsForDispatch(
+      {
+        ...a,
+        emergencyScore: getEmergencyHospitalScore(a?.institutionName || a?.name || '', a?.type || ''),
+        strongSignal: hasStrongEmergencySignal(a?.institutionName || a?.name || '', a?.type || ''),
+        specialtyPenalty: getHospitalSpecialtyPenalty(a?.institutionName || a?.name || '', age),
+      },
+      {
+        ...b,
+        emergencyScore: getEmergencyHospitalScore(b?.institutionName || b?.name || '', b?.type || ''),
+        strongSignal: hasStrongEmergencySignal(b?.institutionName || b?.name || '', b?.type || ''),
+        specialtyPenalty: getHospitalSpecialtyPenalty(b?.institutionName || b?.name || '', age),
+      },
+    );
   });
 }
 
@@ -859,28 +927,69 @@ function parsePatientAge(ageValue) {
   return match ? Number(match[0]) : null;
 }
 
-function getHospitalAgePenalty(name, age) {
+function getHospitalSpecialtyPenalty(name, age) {
   const text = String(name || '');
   const isChildHospital = text.includes('\u513f\u7ae5\u533b\u9662');
   const isWomenChildrenHospital = text.includes('\u5987\u5e7c\u4fdd\u5065\u9662');
 
   if (age == null) {
+    if (isChildHospital) {
+      return 120;
+    }
+    if (isWomenChildrenHospital) {
+      return 25;
+    }
     return 0;
   }
 
   if (age >= 16 && isChildHospital) {
-    return 5;
+    return 180;
   }
 
   if (age >= 16 && isWomenChildrenHospital) {
-    return 2;
+    return 35;
   }
 
   if (age < 16 && isChildHospital) {
-    return -2;
+    return -80;
+  }
+
+  if (age < 16 && isWomenChildrenHospital) {
+    return -15;
   }
 
   return 0;
+}
+
+function compareHospitalsForDispatch(a, b) {
+  const aStrong = !!a?.strongSignal;
+  const bStrong = !!b?.strongSignal;
+  const aScore = Number.isFinite(a?.emergencyScore) ? a.emergencyScore : Number.NEGATIVE_INFINITY;
+  const bScore = Number.isFinite(b?.emergencyScore) ? b.emergencyScore : Number.NEGATIVE_INFINITY;
+  const aPenalty = Number.isFinite(a?.specialtyPenalty) ? a.specialtyPenalty : 0;
+  const bPenalty = Number.isFinite(b?.specialtyPenalty) ? b.specialtyPenalty : 0;
+  const aHasError = !!a?.error;
+  const bHasError = !!b?.error;
+  const aDistance = a?.distance ?? a?.approxDistance ?? Infinity;
+  const bDistance = b?.distance ?? b?.approxDistance ?? Infinity;
+
+  if (aStrong !== bStrong) {
+    return Number(bStrong) - Number(aStrong);
+  }
+
+  if (aScore !== bScore) {
+    return bScore - aScore;
+  }
+
+  if (aPenalty !== bPenalty) {
+    return aPenalty - bPenalty;
+  }
+
+  if (aHasError !== bHasError) {
+    return Number(aHasError) - Number(bHasError);
+  }
+
+  return aDistance - bDistance;
 }
 
 function generateBatchSummary(sequence) {
