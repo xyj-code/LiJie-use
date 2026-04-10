@@ -274,6 +274,34 @@ const lastUpdateTime = ref('--:--:--')
 
 let refreshTimer = null
 
+function classifyChatIntent(question) {
+  const text = String(question || '')
+  const routeTerms = ['路线', '规划', '送医', '医院', '调度', '方案', '怎么走', '导航']
+  if (routeTerms.some((term) => text.includes(term))) return 'route_plan'
+
+  const priorityTerms = ['优先', '最需要救援', '先救']
+  if (priorityTerms.some((term) => text.includes(term))) return 'priority'
+
+  const locationTerms = ['位置', '在哪', '哪里', '附近', '地点', '地址', '坐标']
+  if (locationTerms.some((term) => text.includes(term))) return 'location'
+
+  const identityTerms = ['姓名', '名字', '是谁', '叫什么']
+  if (identityTerms.some((term) => text.includes(term))) return 'identity'
+
+  const medicalTerms = ['病史', '过敏', '血型', '年龄']
+  if (medicalTerms.some((term) => text.includes(term))) return 'medical'
+
+  const contactTerms = ['联系人', '联系', '电话']
+  if (contactTerms.some((term) => text.includes(term))) return 'contact'
+
+  return 'general'
+}
+
+function extractTargetMac(question) {
+  const matches = String(question || '').toUpperCase().match(/[0-9A-F]{2}(?::[0-9A-F]{2}){5}/g) || []
+  return matches[0] || ''
+}
+
 // 血型标签和颜色
 function bloodLabel(type) {
   return BLOOD_LABELS[String(type ?? -1)] || '未知'
@@ -309,11 +337,6 @@ async function fetchPriorities() {
   try {
     const res = await fetch(`${API_BASE}/api/sos/ai/priorities`)
     const json = await res.json()
-    if (json.data?.routeOverlay) {
-      window.dispatchEvent(new CustomEvent('map-show-route', {
-        detail: json.data.routeOverlay,
-      }))
-    }
     priorityList.value = json.data || []
     prioritySummary.value = json.summary || null
   } catch (e) {
@@ -377,6 +400,8 @@ async function generateLlmSummary() {
 async function sendChat() {
   const question = chatInput.value.trim()
   if (!question || chatLoading.value || !situationReport.value) return
+  const intentHint = classifyChatIntent(question)
+  const targetMac = extractTargetMac(question)
   
   chatMessages.value.push({ role: 'user', content: question })
   chatInput.value = ''
@@ -388,11 +413,18 @@ async function sendChat() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         question,
+        intentHint,
+        targetMac,
         contextData: situationReport.value,
         chatHistory: chatMessages.value.slice(-6),
       }),
     })
     const json = await res.json()
+    if (json.data?.routeOverlay) {
+      window.dispatchEvent(new CustomEvent('map-show-route', {
+        detail: json.data.routeOverlay,
+      }))
+    }
     chatMessages.value.push({ role: 'ai', content: json.data?.answer || '抱歉，暂时无法回答' })
   } catch (e) {
     chatMessages.value.push({ role: 'ai', content: `⚠️ 回答失败: ${e.message}` })

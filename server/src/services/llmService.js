@@ -176,24 +176,28 @@ function buildDeterministicAnswer(question, contextData = {}) {
   const generatedPlans = Array.isArray(contextData.generatedPlans) ? contextData.generatedPlans : [];
   const normalizedQuestion = String(question || '');
 
-  if (intent === 'route_plan' && generatedPlans.length > 0) {
+  if (intent === 'route_plan') {
+    if (generatedPlans.length === 0) {
+      return '\u672a\u8bc6\u522b\u5230\u5bf9\u5e94\u7684\u6c42\u6551\u5bf9\u8c61\u3002';
+    }
+
     const plan = generatedPlans[0];
     const route = plan.routeSummary;
     const topHospital = (plan.recommendedHospitals || [])[0] || null;
     const target = plan.name ? `${plan.name} / ${plan.mac}` : plan.mac;
-    const wantsDetailedRoute = /路线|怎么走|如何走|怎么去|过去|导航|步骤/.test(normalizedQuestion);
+    const wantsDetailedRoute = /\u8def\u7ebf|\u600e\u4e48\u8d70|\u5982\u4f55\u8d70|\u600e\u4e48\u53bb|\u8fc7\u53bb|\u5bfc\u822a|\u6b65\u9aa4/.test(normalizedQuestion);
 
     if (route) {
       const routeLines = [
-        `对象: ${target}`,
-        `最近医院: ${route.toHospital}`,
-        `路线: ${route.distanceKm} km，约 ${route.estimatedTimeMinutes} 分钟`,
-        plan.address ? `位置: ${plan.address}` : null,
-        plan.dispatchHint ? `调度提示: ${plan.dispatchHint}` : null,
+        `\u5bf9\u8c61: ${target}`,
+        `\u6700\u8fd1\u533b\u9662: ${route.toHospital}`,
+        `\u8def\u7ebf: ${route.distanceKm} km\uff0c\u7ea6 ${route.estimatedTimeMinutes} \u5206\u949f`,
+        plan.address ? `\u4f4d\u7f6e: ${plan.address}` : null,
+        plan.dispatchHint ? `\u8c03\u5ea6\u63d0\u793a: ${plan.dispatchHint}` : null,
       ].filter(Boolean);
 
       if (wantsDetailedRoute && Array.isArray(route.keySteps) && route.keySteps.length > 0) {
-        routeLines.push('导航步骤:');
+        routeLines.push('\u5bfc\u822a\u6b65\u9aa4:');
         buildFriendlyRouteSteps(route).forEach((step, index) => {
           routeLines.push(`${index + 1}. ${step}`);
         });
@@ -204,13 +208,24 @@ function buildDeterministicAnswer(question, contextData = {}) {
 
     if (topHospital) {
       return [
-        `对象: ${target}`,
-        `最近医院: ${topHospital.name}`,
-        `距离: ${topHospital.distanceKm} km，约 ${topHospital.estimatedTimeMinutes} 分钟`,
+        `\u5bf9\u8c61: ${target}`,
+        `\u5df2\u627e\u5230\u533b\u9662\u5019\u9009: ${topHospital.name}`,
+        `\u4f30\u8ba1\u8ddd\u79bb: ${topHospital.distanceKm} km\uff0c\u7ea6 ${topHospital.estimatedTimeMinutes} \u5206\u949f`,
+        '\u8def\u7ebf\u89c4\u5212\u5931\u8d25\u3002',
       ].join('\n');
     }
 
-    return '无法确认。';
+    if (String(plan.dispatchHint || '').includes('\u81ea\u52a8\u89c4\u5212\u5931\u8d25')) {
+      return [
+        `\u5bf9\u8c61: ${target}`,
+        '\u5df2\u8bc6\u522b\u5230\u6c42\u6551\u5bf9\u8c61\uff0c\u4f46\u8def\u7ebf\u89c4\u5212\u5931\u8d25\u3002',
+      ].join('\n');
+    }
+
+    return [
+      `\u5bf9\u8c61: ${target}`,
+      '\u6ca1\u6709\u5339\u914d\u7684\u533b\u9662\u3002',
+    ].join('\n');
   }
 
   if (intent === 'location' && rankedCases.length > 0) {

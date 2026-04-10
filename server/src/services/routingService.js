@@ -1,34 +1,35 @@
-/**
- * 路径规划服务
- * 提供两点之间的路线计算、距离、预计时间等功能
+﻿/**
+ * 璺緞瑙勫垝鏈嶅姟
+ * 鎻愪緵涓ょ偣涔嬮棿鐨勮矾绾胯绠椼€佽窛绂汇€侀璁℃椂闂寸瓑鍔熻兘
  * 
- * 支持的地图服务商：
- * - 高德地图 (AMap) - 推荐国内使用
- * - 百度地图 (Baidu) - 备选
+ * 鏀寔鐨勫湴鍥炬湇鍔″晢锛?
+ * - 楂樺痉鍦板浘 (AMap) - 鎺ㄨ崘鍥藉唴浣跨敤
+ * - 鐧惧害鍦板浘 (Baidu) - 澶囬€?
  */
 
 // ============================================================================
-// 🔑 API 配置区域 - 请在此处填入您的 API Key
+// 馃攽 API 閰嶇疆鍖哄煙 - 璇峰湪姝ゅ濉叆鎮ㄧ殑 API Key
 // ============================================================================
 
 /**
- * 【必填】高德地图 Web Service API Key（与地理编码共用）
- * 已在 geocodingService.js 中配置，此处复用
+ * 銆愬繀濉€戦珮寰峰湴鍥?Web Service API Key锛堜笌鍦扮悊缂栫爜鍏辩敤锛?
+ * 宸插湪 geocodingService.js 涓厤缃紝姝ゅ澶嶇敤
  */
 const AMAP_API_KEY = process.env.AMAP_API_KEY || 'YOUR_AMAP_API_KEY_HERE';
 
 /**
- * 【可选】百度地图 AK（与地理编码共用）
+ * 銆愬彲閫夈€戠櫨搴﹀湴鍥?AK锛堜笌鍦扮悊缂栫爜鍏辩敤锛?
  */
 const BAIDU_MAP_AK = process.env.BAIDU_MAP_AK || 'YOUR_BAIDU_MAP_AK_HERE';
 
 /**
- * 【可选】是否启用缓存
+ * 銆愬彲閫夈€戞槸鍚﹀惎鐢ㄧ紦瀛?
  */
 const ENABLE_ROUTECACHE = process.env.ENABLE_ROUTECACHE === 'true';
+const { convertPolylineGcjToWgs, wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // ============================================================================
-// 服务实现
+// 鏈嶅姟瀹炵幇
 // ============================================================================
 
 let redisClient = null;
@@ -41,12 +42,12 @@ if (ENABLE_ROUTECACHE) {
     });
     redisClient.connect().catch(console.error);
   } catch (err) {
-    console.warn('[Routing] Redis 连接失败，缓存功能已禁用:', err.message);
+    console.warn('[Routing] Redis 杩炴帴澶辫触锛岀紦瀛樺姛鑳藉凡绂佺敤:', err.message);
   }
 }
 
 /**
- * 从缓存获取路线（如果启用）
+ * 浠庣紦瀛樿幏鍙栬矾绾匡紙濡傛灉鍚敤锛?
  */
 async function getCachedRoute(cacheKey) {
   if (!ENABLE_ROUTECACHE || !redisClient) return null;
@@ -55,13 +56,13 @@ async function getCachedRoute(cacheKey) {
     const cached = await redisClient.get(cacheKey);
     return cached ? JSON.parse(cached) : null;
   } catch (err) {
-    console.warn('[Routing] 缓存读取失败:', err.message);
+    console.warn('[Routing] 缂撳瓨璇诲彇澶辫触:', err.message);
     return null;
   }
 }
 
 /**
- * 写入缓存（如果启用）
+ * 鍐欏叆缂撳瓨锛堝鏋滃惎鐢級
  */
 async function setCachedRoute(cacheKey, data, ttlSeconds = 3600) {
   if (!ENABLE_ROUTECACHE || !redisClient) return;
@@ -69,38 +70,40 @@ async function setCachedRoute(cacheKey, data, ttlSeconds = 3600) {
   try {
     await redisClient.setEx(cacheKey, ttlSeconds, JSON.stringify(data));
   } catch (err) {
-    console.warn('[Routing] 缓存写入失败:', err.message);
+    console.warn('[Routing] 缂撳瓨鍐欏叆澶辫触:', err.message);
   }
 }
 
 /**
- * 使用高德地图计算驾车路线
- * @param {number} originLng - 起点经度
- * @param {number} originLat - 起点纬度
- * @param {number} destLng - 终点经度
- * @param {number} destLat - 终点纬度
- * @param {Object} [options] - 可选参数
- * @param {string} [options.strategy='0'] - 路径策略 (0=速度优先, 1=费用优先, 2=距离优先等)
- * @param {boolean} [options.avoidHighway=false] - 是否避开高速
- * @returns {Promise<Object>} 路线信息对象
+ * 浣跨敤楂樺痉鍦板浘璁＄畻椹捐溅璺嚎
+ * @param {number} originLng - 璧风偣缁忓害
+ * @param {number} originLat - 璧风偣绾害
+ * @param {number} destLng - 缁堢偣缁忓害
+ * @param {number} destLat - 缁堢偣绾害
+ * @param {Object} [options] - 鍙€夊弬鏁?
+ * @param {string} [options.strategy='0'] - 璺緞绛栫暐 (0=閫熷害浼樺厛, 1=璐圭敤浼樺厛, 2=璺濈浼樺厛绛?
+ * @param {boolean} [options.avoidHighway=false] - 鏄惁閬垮紑楂橀€?
+ * @returns {Promise<Object>} 璺嚎淇℃伅瀵硅薄
  */
 async function calculateDrivingRoute(originLng, originLat, destLng, destLat, options = {}) {
   const cacheKey = `route:amap:${originLng.toFixed(5)},${originLat.toFixed(5)}-${destLng.toFixed(5)},${destLat.toFixed(5)}-${options.strategy || '0'}`;
   
-  // 尝试从缓存获取
+  // 灏濊瘯浠庣紦瀛樿幏鍙?
   const cached = await getCachedRoute(cacheKey);
   if (cached) {
     return cached;
   }
   
   if (AMAP_API_KEY === 'YOUR_AMAP_API_KEY_HERE') {
-    throw new Error('AMAP_API_KEY 未配置，请在 server/.env 中添加高德地图 API Key');
+    throw new Error('AMAP_API_KEY 鏈厤缃紝璇峰湪 server/.env 涓坊鍔犻珮寰峰湴鍥?API Key');
   }
   
+  const [originGcjLng, originGcjLat] = wgs84ToGcj02(originLng, originLat);
+  const [destGcjLng, destGcjLat] = wgs84ToGcj02(destLng, destLat);
   const baseUrl = 'https://restapi.amap.com/v3/direction/driving';
   const params = new URLSearchParams({
-    origin: `${originLng},${originLat}`,
-    destination: `${destLng},${destLat}`,
+    origin: `${originGcjLng},${originGcjLat}`,
+    destination: `${destGcjLng},${destGcjLat}`,
     key: AMAP_API_KEY,
     strategy: options.strategy || '0',
     avoidhighway: options.avoidHighway ? '1' : '0',
@@ -111,77 +114,77 @@ async function calculateDrivingRoute(originLng, originLat, destLng, destLat, opt
   const data = await response.json();
   
   if (data.status !== '1') {
-    throw new Error(`高德地图路径规划错误 (${data.infocode}): ${data.info}`);
+    throw new Error(`楂樺痉鍦板浘璺緞瑙勫垝閿欒 (${data.infocode}): ${data.info}`);
   }
   
   if (!data.route.paths || data.route.paths.length === 0) {
     throw new Error('未找到可行路线');
   }
   
-  const path = data.route.paths[0]; // 取第一条路线
+  const path = data.route.paths[0]; // 鍙栫涓€鏉¤矾绾?
   
   const result = {
     provider: 'amap',
-    distance: parseInt(path.distance), // 米
-    duration: parseInt(path.duration), // 秒
-    tolls: parseFloat(path.tolls || 0), // 过路费元
-    trafficLights: parseInt(path.traffic_lights || 0), // 红绿灯数
+    distance: parseInt(path.distance), // 绫?
+    duration: parseInt(path.duration), // 绉?
+    tolls: parseFloat(path.tolls || 0), // 杩囪矾璐瑰厓
+    trafficLights: parseInt(path.traffic_lights || 0), // 绾㈢豢鐏暟
     
-    // 路线概览
+    // 璺嚎姒傝
     overview: {
       startAddress: data.route.origin?.name || '',
       endAddress: data.route.destination?.name || '',
-      taxiCost: parseFloat(path.taxi_cost || 0), // 打车费用估算
+      taxiCost: parseFloat(path.taxi_cost || 0), // 鎵撹溅璐圭敤浼扮畻
     },
     
-    // 详细步骤
+    // 璇︾粏姝ラ
     steps: (path.steps || []).map((step, idx) => ({
       stepIndex: idx + 1,
-      instruction: step.instruction, // 导航指令文本
-      action: step.action, // 动作类型
-      orientation: step.orientation, // 方向
-      road: step.road, // 道路名称
-      distance: parseInt(step.distance), // 本段距离（米）
-      duration: parseInt(step.duration), // 本段时间（秒）
-      polyline: step.polyline, // 坐标串（用于地图绘制）
-      assistNodes: step.assist_nodes || [], // 辅助节点
+      instruction: step.instruction, // 瀵艰埅鎸囦护鏂囨湰
+      action: step.action, // 鍔ㄤ綔绫诲瀷
+      orientation: step.orientation, // 鏂瑰悜
+      road: step.road, // 閬撹矾鍚嶇О
+      distance: parseInt(step.distance), // 鏈璺濈锛堢背锛?
+      duration: parseInt(step.duration), // 鏈鏃堕棿锛堢锛?
+      polyline: convertPolylineGcjToWgs(step.polyline), // route polyline converted to WGS84
+      assistNodes: step.assist_nodes || [], // 杈呭姪鑺傜偣
     })),
     
-    // 原始数据（供调试）
+    // 鍘熷鏁版嵁锛堜緵璋冭瘯锛?
     raw: path,
   };
   
-  // 写入缓存
+  // 鍐欏叆缂撳瓨
   await setCachedRoute(cacheKey, result);
   
   return result;
 }
 
 /**
- * 使用百度地图计算驾车路线（备用方案）
- * @param {number} originLng - 起点经度
- * @param {number} originLat - 起点纬度
- * @param {number} destLng - 终点经度
- * @param {number} destLat - 终点纬度
- * @returns {Promise<Object>} 路线信息对象
+ * 浣跨敤鐧惧害鍦板浘璁＄畻椹捐溅璺嚎锛堝鐢ㄦ柟妗堬級
+ * @param {number} originLng - 璧风偣缁忓害
+ * @param {number} originLat - 璧风偣绾害
+ * @param {number} destLng - 缁堢偣缁忓害
+ * @param {number} destLat - 缁堢偣绾害
+ * @returns {Promise<Object>} 璺嚎淇℃伅瀵硅薄
  */
 async function calculateDrivingRouteWithBaidu(originLng, originLat, destLng, destLat) {
   const cacheKey = `route:baidu:${originLng.toFixed(5)},${originLat.toFixed(5)}-${destLng.toFixed(5)},${destLat.toFixed(5)}`;
   
-  // 尝试从缓存获取
+  // 灏濊瘯浠庣紦瀛樿幏鍙?
   const cached = await getCachedRoute(cacheKey);
   if (cached) {
     return cached;
   }
   
   if (BAIDU_MAP_AK === 'YOUR_BAIDU_MAP_AK_HERE') {
-    throw new Error('BAIDU_MAP_AK 未配置，请在 server/.env 中添加百度地图 AK');
+    throw new Error('BAIDU_MAP_AK 鏈厤缃紝璇峰湪 server/.env 涓坊鍔犵櫨搴﹀湴鍥?AK');
   }
   
   const baseUrl = 'https://api.map.baidu.com/directionlite/v1/driving';
   const params = new URLSearchParams({
     ak: BAIDU_MAP_AK,
-    origin: `${originLat},${originLng}`, // 注意：百度是 lat,lng 顺序
+    origin: `${originLat},${originLng}`, // 娉ㄦ剰锛氱櫨搴︽槸 lat,lng 椤哄簭
     destination: `${destLat},${destLng}`,
     coord_type_input: 'wgs84',
     coord_type_output: 'bd09ll',
@@ -191,7 +194,7 @@ async function calculateDrivingRouteWithBaidu(originLng, originLat, destLng, des
   const data = await response.json();
   
   if (data.status !== 0) {
-    throw new Error(`百度地图路径规划错误 (${data.status}): ${data.message}`);
+    throw new Error(`鐧惧害鍦板浘璺緞瑙勫垝閿欒 (${data.status}): ${data.message}`);
   }
   
   const result_data = data.result.routes[0];
@@ -200,7 +203,7 @@ async function calculateDrivingRouteWithBaidu(originLng, originLat, destLng, des
     provider: 'baidu',
     distance: parseInt(result_data.distance),
     duration: parseInt(result_data.duration),
-    tolls: 0, // 百度免费版不提供过路费
+    tolls: 0, // 鐧惧害鍏嶈垂鐗堜笉鎻愪緵杩囪矾璐?
     trafficLights: 0,
     
     overview: {
@@ -226,23 +229,23 @@ async function calculateDrivingRouteWithBaidu(originLng, originLat, destLng, des
 }
 
 /**
- * 统一的路径规划接口
- * @param {number} originLng - 起点经度
- * @param {number} originLat - 起点纬度
- * @param {number} destLng - 终点经度
- * @param {number} destLat - 终点纬度
- * @param {Object} [options] - 可选参数
- * @param {string} [options.provider='amap'] - 地图提供商
- * @param {string} [options.strategy='0'] - 路径策略
- * @returns {Promise<Object>} 路线信息对象
+ * 缁熶竴鐨勮矾寰勮鍒掓帴鍙?
+ * @param {number} originLng - 璧风偣缁忓害
+ * @param {number} originLat - 璧风偣绾害
+ * @param {number} destLng - 缁堢偣缁忓害
+ * @param {number} destLat - 缁堢偣绾害
+ * @param {Object} [options] - 鍙€夊弬鏁?
+ * @param {string} [options.provider='amap'] - 鍦板浘鎻愪緵鍟?
+ * @param {string} [options.strategy='0'] - 璺緞绛栫暐
+ * @returns {Promise<Object>} 璺嚎淇℃伅瀵硅薄
  */
 async function calculateRoute(originLng, originLat, destLng, destLat, options = {}) {
-  // 验证坐标
+  // 楠岃瘉鍧愭爣
   const isValidCoord = (lng, lat) => 
     lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
   
   if (!isValidCoord(originLng, originLat) || !isValidCoord(destLng, destLat)) {
-    throw new Error(`无效坐标: origin=[${originLng}, ${originLat}], dest=[${destLng}, ${destLat}]`);
+    throw new Error(`鏃犳晥鍧愭爣: origin=[${originLng}, ${originLat}], dest=[${destLng}, ${destLat}]`);
   }
   
   const provider = options.provider || 'amap';
@@ -255,14 +258,14 @@ async function calculateRoute(originLng, originLat, destLng, destLat, options = 
       case 'baidu':
         return await calculateDrivingRouteWithBaidu(originLng, originLat, destLng, destLat);
       default:
-        throw new Error(`不支持的地图提供商: ${provider}`);
+        throw new Error(`涓嶆敮鎸佺殑鍦板浘鎻愪緵鍟? ${provider}`);
     }
   } catch (err) {
-    console.error(`[Routing] ${provider} 路径规划失败:`, err.message);
+    console.error(`[Routing] ${provider} 璺緞瑙勫垝澶辫触:`, err.message);
     
-    // 如果是主提供商失败，尝试备用方案
+    // 濡傛灉鏄富鎻愪緵鍟嗗け璐ワ紝灏濊瘯澶囩敤鏂规
     if (provider === 'amap' && BAIDU_MAP_AK !== 'YOUR_BAIDU_MAP_AK_HERE') {
-      console.log('[Routing] 尝试切换到百度地图...');
+      console.log('[Routing] 灏濊瘯鍒囨崲鍒扮櫨搴﹀湴鍥?..');
       return await calculateDrivingRouteWithBaidu(originLng, originLat, destLng, destLat);
     }
     
@@ -271,11 +274,11 @@ async function calculateRoute(originLng, originLat, destLng, destLat, options = 
 }
 
 /**
- * 批量计算路线（用于多目标优化）
- * @param {Object} origin - 起点 {lng, lat}
- * @param {Array} destinations - 终点数组 [{lng, lat, id}, ...]
- * @param {number} [concurrency=3] - 并发数
- * @returns {Promise<Array>} 路线结果数组
+ * 鎵归噺璁＄畻璺嚎锛堢敤浜庡鐩爣浼樺寲锛?
+ * @param {Object} origin - 璧风偣 {lng, lat}
+ * @param {Array} destinations - 缁堢偣鏁扮粍 [{lng, lat, id}, ...]
+ * @param {number} [concurrency=3] - 骞跺彂鏁?
+ * @returns {Promise<Array>} 璺嚎缁撴灉鏁扮粍
  */
 async function batchCalculateRoutes(origin, destinations, concurrency = 3) {
   const results = [];
@@ -321,23 +324,23 @@ async function batchCalculateRoutes(origin, destinations, concurrency = 3) {
 }
 
 /**
- * 计算直线距离（Haversine公式，无需API）
- * @param {number} lng1 - 起点经度
- * @param {number} lat1 - 起点纬度
- * @param {number} lng2 - 终点经度
- * @param {number} lat2 - 终点纬度
- * @returns {number} 距离（米）
+ * 璁＄畻鐩寸嚎璺濈锛圚aversine鍏紡锛屾棤闇€API锛?
+ * @param {number} lng1 - 璧风偣缁忓害
+ * @param {number} lat1 - 璧风偣绾害
+ * @param {number} lng2 - 缁堢偣缁忓害
+ * @param {number} lat2 - 缁堢偣绾害
+ * @returns {number} 璺濈锛堢背锛?
  */
 function calculateStraightDistance(lng1, lat1, lng2, lat2) {
-  const R = 6371e3; // 地球半径（米）
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
+  const R = 6371e3; // 鍦扮悆鍗婂緞锛堢背锛?
+  const 蠁1 = (lat1 * Math.PI) / 180;
+  const 蠁2 = (lat2 * Math.PI) / 180;
+  const 螖蠁 = ((lat2 - lat1) * Math.PI) / 180;
+  const 螖位 = ((lng2 - lng1) * Math.PI) / 180;
   
-  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-            Math.cos(φ1) * Math.cos(φ2) *
-            Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const a = Math.sin(螖蠁 / 2) * Math.sin(螖蠁 / 2) +
+            Math.cos(蠁1) * Math.cos(蠁2) *
+            Math.sin(螖位 / 2) * Math.sin(螖位 / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   
   return Math.round(R * c);
@@ -350,3 +353,5 @@ module.exports = {
   calculateDrivingRouteWithBaidu,
   calculateStraightDistance,
 };
+
+

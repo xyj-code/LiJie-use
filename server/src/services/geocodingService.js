@@ -36,6 +36,7 @@ const BAIDU_MAP_AK = process.env.BAIDU_MAP_AK || 'YOUR_BAIDU_MAP_AK_HERE';
  * 设置为 true 可减少重复的地理编码请求
  */
 const ENABLE_GEOCACHE = process.env.ENABLE_GEOCACHE === 'true';
+const { gcj02ToWgs84, wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // ============================================================================
 // 服务实现
@@ -102,9 +103,10 @@ async function reverseGeocodeWithAMap(lng, lat) {
     throw new Error('AMAP_API_KEY 未配置，请在 server/.env 中添加高德地图 API Key');
   }
   
+  const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat);
   const baseUrl = 'https://restapi.amap.com/v3/geocode/regeo';
   const params = new URLSearchParams({
-    location: `${lng},${lat}`,
+    location: `${gcjLng},${gcjLat}`,
     key: AMAP_API_KEY,
     radius: '1000',
     extensions: 'all',
@@ -132,15 +134,19 @@ async function reverseGeocodeWithAMap(lng, lat) {
       street: regeocode.addressComponent.streetNumber?.street || '',
       streetNumber: regeocode.addressComponent.streetNumber?.number || '',
     },
-    pois: (regeocode.pois || []).slice(0, 5).map(poi => ({
-      id: poi.id,
-      name: poi.name,
-      type: poi.type,
-      typeCode: poi.typecode,
-      distance: parseInt(poi.distance),
-      direction: poi.direction,
-      location: poi.location.split(',').map(Number),
-    })),
+    pois: (regeocode.pois || []).slice(0, 5).map(poi => {
+      const [poiLng, poiLat] = poi.location.split(',').map(Number);
+      const [wgsLng, wgsLat] = gcj02ToWgs84(poiLng, poiLat);
+      return {
+        id: poi.id,
+        name: poi.name,
+        type: poi.type,
+        typeCode: poi.typecode,
+        distance: parseInt(poi.distance),
+        direction: poi.direction,
+        location: [wgsLng, wgsLat],
+      };
+    }),
     roads: (regeocode.roads || []).slice(0, 3).map(road => ({
       name: road.name,
       distance: parseInt(road.distance),
@@ -155,6 +161,42 @@ async function reverseGeocodeWithAMap(lng, lat) {
   return result;
 }
 
+function normalizeAmapKeywords(keywords, fallback = []) {
+  if (Array.isArray(keywords)) {
+    return keywords.map((item) => String(item || '').trim()).filter(Boolean);
+  }
+
+  return String(keywords || '')
+    .split(/[\s,，]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .concat(fallback)
+    .filter(Boolean);
+}
+
+function mapAmapPoiToWgs(poi) {
+  const gcjLocation = String(poi?.location || '')
+    .split(',')
+    .map((item) => Number(item));
+
+  if (!Array.isArray(gcjLocation) || gcjLocation.length !== 2 || !Number.isFinite(gcjLocation[0]) || !Number.isFinite(gcjLocation[1])) {
+    return null;
+  }
+
+  const [wgsLng, wgsLat] = gcj02ToWgs84(gcjLocation[0], gcjLocation[1]);
+  return {
+    id: poi.id,
+    name: poi.name,
+    type: poi.type,
+    typeCode: poi.typecode,
+    address: poi.address || '',
+    tel: poi.tel || '',
+    distance: parseInt(poi.distance || 0, 10),
+    location: [wgsLng, wgsLat],
+    businessArea: poi.business_area || '',
+  };
+}
+
 async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
   const {
     radius = 5000,
@@ -162,12 +204,7 @@ async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
     keywords = '医院',
   } = options;
 
-  const normalizedKeywords = Array.isArray(keywords)
-    ? keywords
-    : String(keywords || '')
-        .split(/[\s,，]+/)
-        .map((item) => item.trim())
-        .filter(Boolean);
+  const normalizedKeywords = normalizeAmapKeywords(keywords);
   const queryKeywords = normalizedKeywords.length > 0 ? normalizedKeywords : ['医院'];
   const normalizedRadius = Math.min(Math.max(parseInt(radius, 10) || 5000, 1000), 50000);
   const cacheKey = `hospital:amap:${lng.toFixed(6)},${lat.toFixed(6)}:${normalizedRadius}:${pageSize}:${queryKeywords.join('|')}`;
@@ -181,6 +218,7 @@ async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
   }
 
   {
+    const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat);
     const baseUrl = 'https://restapi.amap.com/v3/place/around';
     const allPois = [];
     const seen = new Set();
@@ -188,7 +226,7 @@ async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
     for (const keyword of queryKeywords) {
       const params = new URLSearchParams({
         key: AMAP_API_KEY,
-        location: `${lng},${lat}`,
+        location: `${gcjLng},${gcjLat}`,
         radius: String(normalizedRadius),
         keywords: keyword,
         types: '090000',
@@ -205,19 +243,7 @@ async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
         throw new Error(`妤傛ê鐥夐崷鏉挎禈POI API闁挎瑨顕?(${data.infocode}): ${data.info}`);
       }
 
-      const pois = (data.pois || []).map((poi) => ({
-        id: poi.id,
-        name: poi.name,
-        type: poi.type,
-        typeCode: poi.typecode,
-        address: poi.address || '',
-        tel: poi.tel || '',
-        distance: parseInt(poi.distance || 0, 10),
-        location: String(poi.location || '')
-          .split(',')
-          .map((item) => Number(item)),
-        businessArea: poi.business_area || '',
-      })).filter((poi) => Array.isArray(poi.location) && poi.location.length === 2 && Number.isFinite(poi.location[0]) && Number.isFinite(poi.location[1]));
+      const pois = (data.pois || []).map(mapAmapPoiToWgs).filter(Boolean);
 
       for (const poi of pois) {
         const key = `${poi.id || poi.name}:${poi.location[0]},${poi.location[1]}`;
@@ -271,6 +297,94 @@ async function searchNearbyHospitalsWithAMap(lng, lat, options = {}) {
 
   await setCachedAddress(cacheKey, pois);
   return pois;
+}
+
+async function searchHospitalsByKeywordWithAMap(lng, lat, options = {}) {
+  const {
+    city = '',
+    district = '',
+    pageSize = 10,
+    maxPages = 2,
+    maxDistanceMeters = 50000,
+    maxResults = 8,
+    keywords = [
+      '\u4e09\u7ea7\u7532\u7b49\u533b\u9662',
+      '\u4eba\u6c11\u533b\u9662',
+      '\u4e2d\u5fc3\u533b\u9662',
+      '\u9644\u5c5e\u533b\u9662',
+      '\u603b\u533b\u9662',
+      '\u7efc\u5408\u533b\u9662',
+      '\u6025\u6551\u4e2d\u5fc3',
+    ],
+  } = options;
+
+  const queryKeywords = normalizeAmapKeywords(keywords);
+  const cityHints = [district, city].map((item) => String(item || '').trim()).filter(Boolean);
+  const cacheKey = `hospital:text:${lng.toFixed(6)},${lat.toFixed(6)}:${cityHints.join('|')}:${pageSize}:${maxPages}:${maxDistanceMeters}:${queryKeywords.join('|')}`;
+  const cached = await getCachedAddress(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (AMAP_API_KEY === 'YOUR_AMAP_API_KEY_HERE') {
+    throw new Error('AMAP_API_KEY is not configured');
+  }
+
+  const baseUrl = 'https://restapi.amap.com/v3/place/text';
+  const allPois = [];
+  const seen = new Set();
+
+  outer:
+  for (const keyword of queryKeywords) {
+    for (const cityHint of (cityHints.length > 0 ? cityHints : [''])) {
+      for (let page = 1; page <= maxPages; page += 1) {
+        const params = new URLSearchParams({
+          key: AMAP_API_KEY,
+          keywords: keyword,
+          types: '090000',
+          city: cityHint,
+          citylimit: cityHint ? 'true' : 'false',
+          offset: String(pageSize),
+          page: String(page),
+          extensions: 'all',
+        });
+
+        const response = await fetch(`${baseUrl}?${params}`);
+        const data = await response.json();
+        if (data.status !== '1') {
+          throw new Error(`AMap text search failed (${data.infocode}): ${data.info}`);
+        }
+
+        const pois = (data.pois || [])
+          .map(mapAmapPoiToWgs)
+          .filter(Boolean)
+          .map((poi) => ({
+            ...poi,
+            approxDistance: Math.round(Math.sqrt(((poi.location[0] - lng) * 111320 * Math.cos(lat * Math.PI / 180)) ** 2 + ((poi.location[1] - lat) * 110540) ** 2)),
+          }))
+          .filter((poi) => !Number.isFinite(maxDistanceMeters) || poi.approxDistance <= maxDistanceMeters);
+
+        for (const poi of pois) {
+          const key = `${poi.id || poi.name}:${poi.location[0]},${poi.location[1]}`;
+          if (seen.has(key)) {
+            continue;
+          }
+
+          seen.add(key);
+          allPois.push(poi);
+          if (allPois.length >= maxResults) {
+            break outer;
+          }
+        }
+      }
+    }
+  }
+
+  const mergedPois = allPois
+    .sort((a, b) => (a.approxDistance || Infinity) - (b.approxDistance || Infinity))
+    .slice(0, maxResults);
+  await setCachedAddress(cacheKey, mergedPois);
+  return mergedPois;
 }
 
 /**
@@ -419,4 +533,5 @@ module.exports = {
   reverseGeocodeWithAMap,
   reverseGeocodeWithBaidu,
   searchNearbyHospitalsWithAMap,
+  searchHospitalsByKeywordWithAMap,
 };

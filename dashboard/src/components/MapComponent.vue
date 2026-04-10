@@ -171,7 +171,7 @@ function clearRouteOverlay() {
 function decodeRoutePolyline(route) {
   const steps = Array.isArray(route?.fullSteps) ? route.fullSteps : []
   const points = []
-  const seen = new Set()
+  let lastKey = null
 
   steps.forEach((step) => {
     const segments = String(step?.polyline || '').split(';').filter(Boolean)
@@ -179,13 +179,27 @@ function decodeRoutePolyline(route) {
       const [lng, lat] = pair.split(',').map(Number)
       if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
       const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
-      if (seen.has(key)) return
-      seen.add(key)
+      if (key === lastKey) return
+      lastKey = key
       points.push([lat, lng])
     })
   })
 
   return points
+}
+
+function calcMeters(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return 0
+  const toRad = (deg) => (deg * Math.PI) / 180
+  const [lat1, lng1] = a
+  const [lat2, lng2] = b
+  const dLat = toRad(lat2 - lat1)
+  const dLng = toRad(lng2 - lng1)
+  const lat1Rad = toRad(lat1)
+  const lat2Rad = toRad(lat2)
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.sin(dLng / 2) ** 2
+  return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
 }
 
 function showRouteOverlay(detail) {
@@ -209,6 +223,8 @@ function showRouteOverlay(detail) {
   const endCoords = Array.isArray(detail.route.destinationCoordinates)
     ? [detail.route.destinationCoordinates[1], detail.route.destinationCoordinates[0]]
     : points[points.length - 1]
+  const routeStart = points[0]
+  const routeEnd = points[points.length - 1]
 
   L.circleMarker(startCoords, {
     radius: 7,
@@ -225,6 +241,24 @@ function showRouteOverlay(detail) {
     fillColor: '#ffcc00',
     fillOpacity: 0.9,
   }).bindPopup(`<div class="sos-popup"><div class="p-title">终点</div><div class="p-row"><span>${detail.hospitalName || '医院'}</span><span>${detail.route.distanceKm || ''} km</span></div></div>`).addTo(routeLayerGroup)
+
+  if (calcMeters(startCoords, routeStart) > 20) {
+    L.polyline([startCoords, routeStart], {
+      color: '#00ff88',
+      weight: 2,
+      opacity: 0.8,
+      dashArray: '6, 6',
+    }).addTo(routeLayerGroup)
+  }
+
+  if (calcMeters(routeEnd, endCoords) > 20) {
+    L.polyline([routeEnd, endCoords], {
+      color: '#ffcc00',
+      weight: 2,
+      opacity: 0.8,
+      dashArray: '6, 6',
+    }).addTo(routeLayerGroup)
+  }
 
   map.fitBounds(routeLine.getBounds(), { padding: [40, 40], maxZoom: 16 })
 }

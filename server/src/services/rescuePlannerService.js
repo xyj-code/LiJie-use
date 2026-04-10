@@ -3,7 +3,7 @@
  * 综合地理编码、路径规划、医疗信息，生成完整的救援方案
  */
 
-const { reverseGeocode, searchNearbyHospitalsWithAMap } = require('./geocodingService');
+const { reverseGeocode, searchNearbyHospitalsWithAMap, searchHospitalsByKeywordWithAMap } = require('./geocodingService');
 const { calculateRoute, batchCalculateRoutes, calculateStraightDistance } = require('./routingService');
 const { rankSosList } = require('../utils/priorityEngine');
 
@@ -16,14 +16,7 @@ const { rankSosList } = require('../utils/priorityEngine');
  * 格式：{ name: '医院名称', lng: 经度, lat: 纬度 }
  * 建议：根据实际部署地区修改为当地主要医院
  */
-const DEFAULT_HOSPITALS = process.env.DEFAULT_HOSPITALS ? 
-  JSON.parse(process.env.DEFAULT_HOSPITALS) : [
-    {
-      name: '市第一人民医院',
-      lng: 116.397, // 北京示例坐标，请修改
-      lat: 39.918,
-    },
-  ];
+const DEFAULT_HOSPITALS = [];
 
 /**
  * 【可选】最大并发路径计算数
@@ -548,6 +541,7 @@ function normalizeHospitalCandidate(poi, source = 'nearby_poi') {
   const location = Array.isArray(poi?.location) ? poi.location : [];
   const lng = Number(location[0] ?? poi?.lng);
   const lat = Number(location[1] ?? poi?.lat);
+  const displayName = simplifyHospitalName(poi?.name || '');
   const canonicalName = extractHospitalInstitutionName(poi?.name || '', poi?.type || '');
 
   if (!Number.isFinite(lng) || !Number.isFinite(lat) || !canonicalName) {
@@ -555,7 +549,8 @@ function normalizeHospitalCandidate(poi, source = 'nearby_poi') {
   }
 
   return {
-    name: canonicalName,
+    name: displayName || canonicalName,
+    institutionName: canonicalName,
     lng,
     lat,
     source,
@@ -645,28 +640,88 @@ function isUsableHospitalCandidate(poi) {
 
   const name = String(poi?.name || '');
   const type = String(poi?.type || '');
-  return Boolean(extractHospitalInstitutionName(name, type));
+  return getEmergencyHospitalScore(name, type) > 0;
+}
+
+function isMainHospitalEntityName(name, type = '') {
+  const text = simplifyHospitalName(name);
+  const typeText = String(type || '');
+
+  if (!text || !extractHospitalInstitutionName(text, typeText)) {
+    return false;
+  }
+
+  const exactPatterns = [
+    /.*(?:大学(?:附属)?(?:第[一二三四五六七八九十0-9]+)?医院)(?:院区|分院|[东南西北]区)?$/,
+    /.*(?:医学院(?:附属)?(?:第[一二三四五六七八九十0-9]+)?医院)(?:院区|分院|[东南西北]区)?$/,
+    /.*(?:第[一二三四五六七八九十0-9]+人民医院)(?:院区|分院|[东南西北]区)?$/,
+    /.*(?:人民医院|中心医院|总医院|附属医院|妇幼保健院|中医院|儿童医院|肿瘤医院|胸科医院|精神卫生中心|急救中心|医疗中心)(?:院区|分院|[东南西北]区)?$/,
+  ];
+
+  if (exactPatterns.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+
+  const humanHospitalType = /综合医院|三级甲等医院|三级医院|专科医院|急救中心|医疗中心/.test(typeText);
+  return humanHospitalType && /.*医院(?:院区|分院|[东南西北]区)?$/.test(text);
+}
+
+function isClearlyNonEmergencyHospital(name, type = '') {
+  const text = `${simplifyHospitalName(name)} ${String(type || '')}`;
+  return /美容|整形|宠物|口腔门诊|门诊部|诊所|体检|健康管理|养生|美容医院|医疗美容|宠物医院/.test(text);
+}
+
+function getEmergencyHospitalScore(name, type = '') {
+  const text = simplifyHospitalName(name);
+  const typeText = String(type || '');
+
+  if (!text || !extractHospitalInstitutionName(text, typeText)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  if (isClearlyNonEmergencyHospital(text, typeText)) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+
+  if (/三级甲等医院|三级医院/.test(typeText)) {
+    score += 120;
+  }
+  if (/综合医院|急救中心/.test(typeText)) {
+    score += 100;
+  }
+  if (/大学.*附属.*医院|医学院.*附属.*医院|人民医院|中心医院|总医院/.test(text)) {
+    score += 90;
+  }
+  if (/省.*医院|市.*医院/.test(text)) {
+    score += 35;
+  }
+  if (/院区|分院|西区|东区|南区|北区/.test(text)) {
+    score += 15;
+  }
+  if (/专科医院/.test(typeText)) {
+    score -= 15;
+  }
+  if (/妇幼保健院|儿童医院/.test(text)) {
+    score -= 10;
+  }
+
+  return score;
 }
 
 async function resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, fallbackHospitals = []) {
   const searchPlans = [
     {
       keywords: [
+        '\u4e09\u7ea7\u7532\u7b49\u533b\u9662',
+        '\u7efc\u5408\u533b\u9662',
         '\u4eba\u6c11\u533b\u9662',
         '\u4e2d\u5fc3\u533b\u9662',
         '\u9644\u5c5e\u533b\u9662',
         '\u603b\u533b\u9662',
-        '\u4e09\u7532\u533b\u9662',
       ],
-      radii: [8000, 15000, 30000, 50000],
-    },
-    {
-      keywords: [
-        '\u533b\u9662',
-        '\u6025\u6551\u4e2d\u5fc3',
-        '\u533b\u7597\u4e2d\u5fc3',
-      ],
-      radii: [8000, 15000, 30000, 50000],
+      radii: [10000, 30000, 50000],
     },
   ];
 
@@ -683,7 +738,7 @@ async function resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, fallback
 
         if (Array.isArray(result) && result.length > 0) {
           nearbyHospitals = mergeHospitalCandidates(nearbyHospitals, result);
-          if (nearbyHospitals.length >= 3) {
+          if (nearbyHospitals.filter((item) => isUsableHospitalCandidate(item)).length >= 3) {
             break;
           }
         }
@@ -694,8 +749,37 @@ async function resolveCandidateHospitalsAdaptive(lng, lat, addressInfo, fallback
       }
     }
 
-    if (nearbyHospitals.length > 0) {
+    if (nearbyHospitals.filter((item) => isUsableHospitalCandidate(item)).length > 0) {
       break;
+    }
+  }
+
+  if (nearbyHospitals.filter((item) => isUsableHospitalCandidate(item)).length < 3) {
+    try {
+      const keywordHospitals = await searchHospitalsByKeywordWithAMap(lng, lat, {
+        district: addressInfo?.addressComponent?.district || '',
+        city: addressInfo?.addressComponent?.city || addressInfo?.addressComponent?.province || '',
+        pageSize: 10,
+        maxPages: 2,
+        maxDistanceMeters: 50000,
+        keywords: [
+          '\u4e09\u7ea7\u7532\u7b49\u533b\u9662',
+          '\u4eba\u6c11\u533b\u9662',
+          '\u4e2d\u5fc3\u533b\u9662',
+          '\u9644\u5c5e\u533b\u9662',
+          '\u603b\u533b\u9662',
+          '\u7efc\u5408\u533b\u9662',
+          '\u6025\u6551\u4e2d\u5fc3',
+        ],
+      });
+
+      if (Array.isArray(keywordHospitals) && keywordHospitals.length > 0) {
+        nearbyHospitals = mergeHospitalCandidates(nearbyHospitals, keywordHospitals);
+      }
+    } catch (err) {
+      if (DEBUG_MODE) {
+        console.warn(`[RescuePlanner] keyword hospital search: ${err.message}`);
+      }
     }
   }
 
@@ -726,23 +810,23 @@ function mergeHospitalCandidates(existing, incoming) {
 }
 
 function prioritizeMajorHospitals(hospitals) {
-  const majorKeywords = [
-    '\u4e09\u7532',
-    '\u4eba\u6c11\u533b\u9662',
-    '\u4e2d\u5fc3\u533b\u9662',
-    '\u5927\u5b66',
-    '\u9644\u5c5e',
-    '\u603b\u533b\u9662',
-  ];
+  const scored = [...(Array.isArray(hospitals) ? hospitals : [])]
+    .map((hospital) => ({
+      ...hospital,
+      emergencyScore: getEmergencyHospitalScore(
+        hospital?.institutionName || hospital?.name || '',
+        hospital?.type || '',
+      ),
+    }))
+    .filter((hospital) => Number.isFinite(hospital.emergencyScore));
 
-  return [...(Array.isArray(hospitals) ? hospitals : [])].sort((a, b) => {
-    const aName = String(a?.name || '');
-    const bName = String(b?.name || '');
-    const aMajor = majorKeywords.some((keyword) => aName.includes(keyword)) ? 1 : 0;
-    const bMajor = majorKeywords.some((keyword) => bName.includes(keyword)) ? 1 : 0;
+  const strong = scored.filter((hospital) => hospital.emergencyScore >= 100);
+  const usable = strong.length > 0 ? strong : scored.filter((hospital) => hospital.emergencyScore > 0);
+  const pool = usable.length > 0 ? usable : scored;
 
-    if (aMajor !== bMajor) {
-      return bMajor - aMajor;
+  return pool.sort((a, b) => {
+    if (a.emergencyScore !== b.emergencyScore) {
+      return b.emergencyScore - a.emergencyScore;
     }
 
     return (a?.distance || a?.approxDistance || Infinity) - (b?.distance || b?.approxDistance || Infinity);
@@ -753,8 +837,14 @@ function rankHospitalsForPatient(hospitals, sosRecord) {
   const age = parsePatientAge(sosRecord?.medicalProfile?.age);
 
   return [...(Array.isArray(hospitals) ? hospitals : [])].sort((a, b) => {
+    const aScore = getEmergencyHospitalScore(a?.institutionName || a?.name || '', a?.type || '');
+    const bScore = getEmergencyHospitalScore(b?.institutionName || b?.name || '', b?.type || '');
     const aPenalty = getHospitalAgePenalty(a?.name || '', age);
     const bPenalty = getHospitalAgePenalty(b?.name || '', age);
+
+    if (aScore !== bScore) {
+      return bScore - aScore;
+    }
 
     if (aPenalty !== bPenalty) {
       return aPenalty - bPenalty;

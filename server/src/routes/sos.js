@@ -5,7 +5,7 @@ const socketService = require('../socket');
 const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
 const { generateSingleRescuePlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
-const { reverseGeocode, searchNearbyHospitalsWithAMap } = require('../services/geocodingService');
+const { reverseGeocode, searchNearbyHospitalsWithAMap, searchHospitalsByKeywordWithAMap } = require('../services/geocodingService');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
@@ -323,7 +323,7 @@ router.post('/ai/generate-report', async (req, res) => {
  */
 router.post('/ai/chat', async (req, res) => {
   try {
-    const { question, contextData, chatHistory } = req.body;
+    const { question, contextData, chatHistory, intentHint, targetMac } = req.body;
     if (!question) {
       return res.status(400).json({ error: '缺少 question 参数' });
     }
@@ -334,6 +334,8 @@ router.post('/ai/chat', async (req, res) => {
     const chatContext = await buildChatContext(question, ranked, {
       ...(contextData || {}),
       chatHistory: Array.isArray(chatHistory) ? chatHistory : [],
+      intentHint: typeof intentHint === 'string' ? intentHint : '',
+      targetMac: typeof targetMac === 'string' ? targetMac : '',
     });
     const answer = await answerQuestion(question, chatContext);
     return res.status(200).json({ data: { answer, routeOverlay: buildRouteOverlay(chatContext) } });
@@ -420,6 +422,42 @@ router.get('/ai/debug-hospitals/:mac', async (req, res) => {
       }
     }
 
+    const keywordProbes = [];
+    const keywordSearchTerms = [
+      '\u4e09\u7ea7\u7532\u7b49\u533b\u9662',
+      '\u4eba\u6c11\u533b\u9662',
+      '\u4e2d\u5fc3\u533b\u9662',
+      '\u9644\u5c5e\u533b\u9662',
+      '\u603b\u533b\u9662',
+      '\u7efc\u5408\u533b\u9662',
+      '\u6025\u6551\u4e2d\u5fc3',
+    ];
+    try {
+      const pois = await searchHospitalsByKeywordWithAMap(lng, lat, {
+        district: address?.addressComponent?.district || '',
+        city: address?.addressComponent?.city || address?.addressComponent?.province || '',
+        pageSize: 10,
+        maxPages: 2,
+        maxDistanceMeters: 50000,
+        keywords: keywordSearchTerms,
+      });
+
+      keywordProbes.push({
+        count: pois.length,
+        hospitals: pois.slice(0, 10).map((poi) => ({
+          name: poi.name,
+          approxDistance: poi.approxDistance,
+          type: poi.type,
+          address: poi.address,
+          location: poi.location,
+        })),
+      });
+    } catch (error) {
+      keywordProbes.push({
+        error: error.message,
+      });
+    }
+
     const ranked = rankSosList([sosRecord]);
     sosRecord.priority = ranked[0]?.priority || null;
     const plan = await generateSingleRescuePlan(sosRecord);
@@ -434,6 +472,7 @@ router.get('/ai/debug-hospitals/:mac', async (req, res) => {
           pois: (address?.pois || []).slice(0, 5),
         },
         probes,
+        keywordProbes,
         finalPlan: {
           route: plan.route,
           recommendedHospitals: plan.recommendedHospitals,
@@ -724,9 +763,12 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
   const chatHistory = Array.isArray(clientContext.chatHistory) ? clientContext.chatHistory : [];
   const summaryOverrides = { ...clientContext };
   delete summaryOverrides.chatHistory;
-  const intent = classifyQuestionIntent(question);
+  delete summaryOverrides.intentHint;
+  delete summaryOverrides.targetMac;
+  const hintedIntent = normalizeIntentHint(clientContext.intentHint);
+  const intent = hintedIntent || classifyQuestionIntent(question);
   const topRecords = rankedRecords.slice(0, 8);
-  const matchedRecords = findRelevantRecords(question, rankedRecords, intent, chatHistory);
+  const matchedRecords = findRelevantRecords(question, rankedRecords, intent, chatHistory, clientContext.targetMac);
   const focusRecords = matchedRecords.length > 0
     ? matchedRecords.slice(0, intent === 'route_plan' ? 3 : 5)
     : topRecords.slice(0, intent === 'priority' ? 3 : 5);
@@ -818,10 +860,11 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
   };
 }
 
-function findRelevantRecords(question, rankedRecords, intent = 'general', chatHistory = []) {
+function findRelevantRecords(question, rankedRecords, intent = 'general', chatHistory = [], targetMac = '') {
   const upperQuestion = String(question || '').toUpperCase();
   const macMatches = upperQuestion.match(/[0-9A-F]{2}(?::[0-9A-F]{2}){5}/g) || [];
-  const uniqueMacs = [...new Set(macMatches)];
+  const hintedMac = String(targetMac || '').toUpperCase().trim();
+  const uniqueMacs = [...new Set([hintedMac, ...macMatches].filter(Boolean))];
 
   const macRecords = rankedRecords.filter((record) => uniqueMacs.includes(record.senderMac));
   if (macRecords.length > 0) {
@@ -863,27 +906,27 @@ function shouldResolveFromHistory(question) {
     return false;
   }
 
-  const referentialPatterns = [
-    /这个人/,
-    /这人/,
-    /这个求救者/,
-    /该求救者/,
-    /该患者/,
-    /这个患者/,
-    /此人/,
-    /他/,
-    /她/,
-    /TA/i,
-    /其位置/,
-    /当前位置/,
-    /在哪里/,
-    /在哪/,
-    /具体位置/,
-    /坐标/,
-    /地点/,
+  const referentialTerms = [
+    '\u8fd9\u4e2a\u4eba',
+    '\u8fd9\u4eba',
+    '\u8fd9\u4e2a\u6c42\u6551\u8005',
+    '\u8be5\u6c42\u6551\u8005',
+    '\u8be5\u60a3\u8005',
+    '\u8fd9\u4e2a\u60a3\u8005',
+    '\u6b64\u4eba',
+    '\u4ed6',
+    '\u5979',
+    'TA',
+    '\u5176\u4f4d\u7f6e',
+    '\u5f53\u524d\u4f4d\u7f6e',
+    '\u5728\u54ea\u91cc',
+    '\u5728\u54ea',
+    '\u5177\u4f53\u4f4d\u7f6e',
+    '\u5750\u6807',
+    '\u5730\u70b9',
   ];
 
-  return referentialPatterns.some((pattern) => pattern.test(text));
+  return referentialTerms.some((term) => text.includes(term));
 }
 
 function resolveRecordsFromHistory(chatHistory, rankedRecords) {
@@ -923,59 +966,45 @@ function resolveRecordsFromHistory(chatHistory, rankedRecords) {
 }
 
 function classifyQuestionIntent(question) {
-  const upperQuestion = String(question || '').toUpperCase();
-  if (
-    upperQuestion.includes('路线') ||
-    upperQuestion.includes('规划') ||
-    upperQuestion.includes('送医') ||
-    upperQuestion.includes('医院') ||
-    upperQuestion.includes('调度') ||
-    upperQuestion.includes('方案')
-  ) {
+  const text = String(question || '');
+
+  const routeTerms = ['\u8def\u7ebf', '\u89c4\u5212', '\u9001\u533b', '\u533b\u9662', '\u8c03\u5ea6', '\u65b9\u6848'];
+  if (routeTerms.some((term) => text.includes(term))) {
     return 'route_plan';
   }
-  if (
-    upperQuestion.includes('优先') ||
-    upperQuestion.includes('最需要救援') ||
-    upperQuestion.includes('先救')
-  ) {
+
+  const priorityTerms = ['\u4f18\u5148', '\u6700\u9700\u8981\u6551\u63f4', '\u5148\u6551'];
+  if (priorityTerms.some((term) => text.includes(term))) {
     return 'priority';
   }
-  if (
-    upperQuestion.includes('位置') ||
-    upperQuestion.includes('在哪') ||
-    upperQuestion.includes('哪里') ||
-    upperQuestion.includes('附近') ||
-    upperQuestion.includes('地点') ||
-    upperQuestion.includes('地址') ||
-    upperQuestion.includes('坐标')
-  ) {
+
+  const locationTerms = ['\u4f4d\u7f6e', '\u5728\u54ea', '\u54ea\u91cc', '\u9644\u8fd1', '\u5730\u70b9', '\u5730\u5740', '\u5750\u6807'];
+  if (locationTerms.some((term) => text.includes(term))) {
     return 'location';
   }
-  if (
-    upperQuestion.includes('姓名') ||
-    upperQuestion.includes('名字') ||
-    upperQuestion.includes('是谁') ||
-    upperQuestion.includes('叫什么')
-  ) {
+
+  const identityTerms = ['\u59d3\u540d', '\u540d\u5b57', '\u662f\u8c01', '\u53eb\u4ec0\u4e48'];
+  if (identityTerms.some((term) => text.includes(term))) {
     return 'identity';
   }
-  if (
-    upperQuestion.includes('病史') ||
-    upperQuestion.includes('过敏') ||
-    upperQuestion.includes('血型') ||
-    upperQuestion.includes('年龄')
-  ) {
+
+  const medicalTerms = ['\u75c5\u53f2', '\u8fc7\u654f', '\u8840\u578b', '\u5e74\u9f84'];
+  if (medicalTerms.some((term) => text.includes(term))) {
     return 'medical';
   }
-  if (
-    upperQuestion.includes('联系人') ||
-    upperQuestion.includes('联系') ||
-    upperQuestion.includes('电话')
-  ) {
+
+  const contactTerms = ['\u8054\u7cfb\u4eba', '\u8054\u7cfb', '\u7535\u8bdd'];
+  if (contactTerms.some((term) => text.includes(term))) {
     return 'contact';
   }
+
   return 'general';
+}
+
+function normalizeIntentHint(intentHint) {
+  const value = String(intentHint || '').trim().toLowerCase();
+  const allowed = new Set(['route_plan', 'priority', 'location', 'identity', 'medical', 'contact', 'general']);
+  return allowed.has(value) ? value : '';
 }
 
 function pruneCaseForIntent(data, intent) {
