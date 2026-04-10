@@ -770,6 +770,7 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
   delete summaryOverrides.targetMac;
   const hintedIntent = normalizeIntentHint(clientContext.intentHint);
   const intent = hintedIntent || classifyQuestionIntent(question);
+  const includeAllLocationCases = shouldIncludeAllLocationCases(question, intent);
   const topRecords = rankedRecords.slice(0, 8);
   const matchedRecords = findRelevantRecords(question, rankedRecords, intent, chatHistory, clientContext.targetMac);
   const focusRecords = matchedRecords.length > 0
@@ -840,6 +841,43 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
       urgentCount: rankedRecords.filter((r) => r.priority?.severityLevel === 'urgent').length,
       ...summaryOverrides,
     },
+    allCases: rankedRecords.map((record) => ({
+      mac: record.senderMac,
+      name: record.medicalProfile?.name || '',
+      age: record.medicalProfile?.age || '',
+      priorityScore: record.priority?.score ?? 0,
+      severityLevel: record.priority?.severityLevel || 'unknown',
+      elapsedMin: record.priority?.elapsedMin ?? 0,
+      bloodTypeName: bloodTypeCodeToLabel(
+        record.medicalProfile?.bloodTypeDetail ?? record.bloodType,
+      ),
+      medicalHistory: record.medicalProfile?.medicalHistory || '',
+      allergies: record.medicalProfile?.allergies || '',
+      emergencyContact: record.medicalProfile?.emergencyContact || '',
+      locationText: formatCoordinates(record.location?.coordinates || []),
+      province: coordsToProvince(
+        record.location?.coordinates?.[0],
+        record.location?.coordinates?.[1],
+      ),
+      confidence: record.confidence ?? (record.reportedBy?.length || 0),
+      addressText: locationDetailsByMac.get(record.senderMac)?.addressText || '',
+      nearbyLandmark: locationDetailsByMac.get(record.senderMac)?.nearbyLandmark || '',
+      formattedAddress: locationDetailsByMac.get(record.senderMac)?.formattedAddress || '',
+    })),
+    allLocationCases: includeAllLocationCases
+      ? rankedRecords.map((record) => ({
+        mac: record.senderMac,
+        name: record.medicalProfile?.name || '',
+        priorityScore: record.priority?.score ?? 0,
+        severityLevel: record.priority?.severityLevel || 'unknown',
+        elapsedMin: record.priority?.elapsedMin ?? 0,
+        locationText: formatCoordinates(record.location?.coordinates || []),
+        province: coordsToProvince(
+          record.location?.coordinates?.[0],
+          record.location?.coordinates?.[1],
+        ),
+      }))
+      : [],
     rankedCases: focusRecords.map((record) => pruneCaseForIntent({
       mac: record.senderMac,
       name: record.medicalProfile?.name || '',
@@ -861,6 +899,35 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
     }, intent)),
     generatedPlans: intent === 'route_plan' ? generatedPlans : [],
   };
+}
+
+function shouldIncludeAllLocationCases(question, intent) {
+  if (intent === 'location') {
+    return true;
+  }
+
+  const text = String(question || '');
+  if (!text) {
+    return false;
+  }
+
+  const broadLocationTerms = [
+    '\u54ea\u4e2a\u7701',
+    '\u54ea\u4e9b\u7701',
+    '\u54ea\u4e2a\u57ce\u5e02',
+    '\u54ea\u4e9b\u57ce\u5e02',
+    '\u5206\u5e03',
+    '\u5206\u5e03\u60c5\u51b5',
+    '\u54ea\u91cc\u6700\u4e25\u91cd',
+    '\u54ea\u91cc\u60c5\u51b5\u6700\u4e25\u91cd',
+    '\u54ea\u91cc\u6700\u5371\u9669',
+    '\u54ea\u4e2a\u5730\u533a',
+    '\u54ea\u4e9b\u70b9',
+    '\u5168\u90e8\u6c42\u6551\u70b9',
+    '\u6240\u6709\u6c42\u6551\u70b9',
+  ];
+
+  return broadLocationTerms.some((term) => text.includes(term));
 }
 
 function findRelevantRecords(question, rankedRecords, intent = 'general', chatHistory = [], targetMac = '') {

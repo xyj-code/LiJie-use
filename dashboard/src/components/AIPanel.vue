@@ -44,6 +44,10 @@
           v-for="(item, idx) in priorityList.slice(0, 20)" 
           :key="item.senderMac"
           :class="['priority-item', item.priority.severityLevel]"
+          role="button"
+          tabindex="0"
+          @click="focusPriorityItem(item)"
+          @keyup.enter="focusPriorityItem(item)"
         >
           <div class="priority-rank">#{{ idx + 1 }}</div>
           <div class="priority-info">
@@ -437,6 +441,13 @@ function flyToArea(area) {
   }))
 }
 
+function focusPriorityItem(item) {
+  if (!item) return
+  window.dispatchEvent(new CustomEvent('map-flyto', {
+    detail: item,
+  }))
+}
+
 // LLM 生成态势摘要
 async function generateLlmSummary() {
   if (!situationReport.value) return
@@ -661,11 +672,20 @@ function handleRouteStepChanged(e) {
   border-radius: 4px;
   background: rgba(0, 15, 40, 0.8);
   border: 1px solid rgba(100, 150, 200, 0.1);
-  transition: border-color 0.2s;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
 }
 
 .priority-item:hover {
   border-color: rgba(0, 200, 255, 0.3);
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+.priority-item:focus-visible {
+  outline: none;
+  border-color: rgba(0, 229, 255, 0.42);
+  box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.24), 0 10px 24px rgba(0, 0, 0, 0.18);
 }
 
 .priority-item.critical {
