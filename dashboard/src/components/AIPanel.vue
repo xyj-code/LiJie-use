@@ -219,6 +219,32 @@
             </div>
           </div>
         </div>
+
+        <div v-if="currentRouteOverlay" class="route-step-panel">
+          <div class="route-step-panel-head">
+            <div>
+              <div class="route-step-panel-title">当前导航</div>
+              <div class="route-step-panel-meta">
+                {{ currentRouteOverlay.name || currentRouteOverlay.mac }} → {{ currentRouteOverlay.hospitalName }}
+              </div>
+              <div class="route-step-panel-meta">
+                {{ currentRouteOverlay.route?.distanceKm || '--' }} km · {{ currentRouteOverlay.route?.estimatedTimeMinutes || '--' }} 分钟
+              </div>
+            </div>
+            <button class="route-focus-btn" @click="focusWholeRoute">定位路线</button>
+          </div>
+          <div class="route-step-list">
+            <button
+              v-for="(step, idx) in getRouteSteps(currentRouteOverlay.route)"
+              :key="`${currentRouteOverlay.mac}-${idx}`"
+              :class="['route-step-btn', { active: activeRouteStepIndex === idx }]"
+              @click="focusRouteStep(idx)"
+            >
+              <span class="route-step-index">{{ idx + 1 }}</span>
+              <span class="route-step-text">{{ step.instruction }}</span>
+            </button>
+          </div>
+        </div>
         
         <div class="chat-input-area">
           <input 
@@ -271,6 +297,8 @@ const chatInput = ref('')
 const chatLoading = ref(false)
 const loading = ref(false)
 const lastUpdateTime = ref('--:--:--')
+const currentRouteOverlay = ref(null)
+const activeRouteStepIndex = ref(-1)
 
 let refreshTimer = null
 
@@ -300,6 +328,39 @@ function classifyChatIntent(question) {
 function extractTargetMac(question) {
   const matches = String(question || '').toUpperCase().match(/[0-9A-F]{2}(?::[0-9A-F]{2}){5}/g) || []
   return matches[0] || ''
+}
+
+function getRouteSteps(route) {
+  if (Array.isArray(route?.fullSteps) && route.fullSteps.length) {
+    return route.fullSteps.slice(0, 8).map((step) => ({
+      instruction: step.instruction || '继续前进',
+    }))
+  }
+
+  if (Array.isArray(route?.keySteps) && route.keySteps.length) {
+    return route.keySteps.slice(0, 8).map((instruction) => ({ instruction }))
+  }
+
+  return []
+}
+
+function focusRouteStep(index) {
+  if (!currentRouteOverlay.value) return
+  activeRouteStepIndex.value = index
+  window.dispatchEvent(new CustomEvent('map-highlight-route-step', {
+    detail: {
+      stepIndex: index,
+      routeOverlay: currentRouteOverlay.value,
+    },
+  }))
+}
+
+function focusWholeRoute() {
+  if (!currentRouteOverlay.value) return
+  activeRouteStepIndex.value = -1
+  window.dispatchEvent(new CustomEvent('map-focus-route', {
+    detail: currentRouteOverlay.value,
+  }))
 }
 
 // 血型标签和颜色
@@ -421,6 +482,8 @@ async function sendChat() {
     })
     const json = await res.json()
     if (json.data?.routeOverlay) {
+      currentRouteOverlay.value = json.data.routeOverlay
+      activeRouteStepIndex.value = -1
       window.dispatchEvent(new CustomEvent('map-show-route', {
         detail: json.data.routeOverlay,
       }))
@@ -469,11 +532,18 @@ onMounted(() => {
   refreshAll()
   // 每30秒自动刷新
   refreshTimer = setInterval(refreshAll, 30000)
+  window.addEventListener('map-route-step-changed', handleRouteStepChanged)
 })
 
 onUnmounted(() => {
   if (refreshTimer) clearInterval(refreshTimer)
+  window.removeEventListener('map-route-step-changed', handleRouteStepChanged)
 })
+
+function handleRouteStepChanged(e) {
+  const stepIndex = Number(e.detail?.stepIndex)
+  activeRouteStepIndex.value = Number.isInteger(stepIndex) ? stepIndex : -1
+}
 </script>
 
 <style scoped>
@@ -1136,6 +1206,112 @@ onUnmounted(() => {
   padding-top: 8px;
   border-top: 1px solid rgba(100, 150, 200, 0.1);
   flex-shrink: 0;
+}
+
+.route-step-panel {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(0, 229, 255, 0.18);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(2, 22, 40, 0.96), rgba(1, 14, 28, 0.96));
+}
+
+.route-step-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.route-step-panel-title {
+  color: #8fefff;
+  font-size: 0.72rem;
+  font-weight: bold;
+}
+
+.route-step-panel-meta {
+  color: rgba(180, 225, 255, 0.72);
+  font-size: 0.6rem;
+  line-height: 1.45;
+}
+
+.route-focus-btn {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 229, 255, 0.24);
+  background: rgba(0, 229, 255, 0.1);
+  color: #9df5ff;
+  cursor: pointer;
+  font-size: 0.62rem;
+}
+
+.route-focus-btn:hover {
+  background: rgba(0, 229, 255, 0.16);
+}
+
+.route-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.route-step-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 229, 255, 0.12);
+  background: rgba(5, 19, 34, 0.82);
+  color: #d9f7ff;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.route-step-btn:hover {
+  border-color: rgba(0, 229, 255, 0.32);
+  background: rgba(8, 28, 49, 0.94);
+  transform: translateX(2px);
+}
+
+.route-step-btn.active {
+  border-color: rgba(255, 234, 91, 0.62);
+  background: rgba(47, 41, 10, 0.7);
+  box-shadow: 0 0 0 1px rgba(255, 234, 91, 0.18) inset;
+}
+
+.route-step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 229, 255, 0.14);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  color: #98f4ff;
+  font-size: 0.64rem;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.route-step-btn.active .route-step-index {
+  background: rgba(255, 234, 91, 0.18);
+  border-color: rgba(255, 234, 91, 0.4);
+  color: #fff4a3;
+}
+
+.route-step-text {
+  color: rgba(224, 247, 255, 0.92);
+  font-size: 0.66rem;
+  line-height: 1.45;
 }
 
 .chat-input {

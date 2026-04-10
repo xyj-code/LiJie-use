@@ -1,5 +1,48 @@
 <template>
   <div ref="mapEl" class="map-wrap">
+    <div v-if="currentRouteState" :class="['route-hud', { compact: isRouteHudCompact }]">
+      <div class="route-hud-head">
+        <div class="route-hud-head-copy">
+          <div class="route-hud-title">导航路线已锁定</div>
+          <div class="route-hud-subtitle">
+            {{ currentRouteState.name || currentRouteState.mac }} → {{ currentRouteState.hospitalName }}
+          </div>
+        </div>
+        <div class="route-hud-tools">
+          <button class="route-hud-icon-btn" @click="toggleRouteHudCompact">
+            {{ isRouteHudCompact ? '展开' : '收起' }}
+          </button>
+          <button class="route-hud-icon-btn" @click="clearRouteOverlay">关闭</button>
+        </div>
+      </div>
+      <div v-if="isRouteHudCompact" class="route-hud-compact-summary">
+        <span>{{ currentRouteState.route?.distanceKm || '--' }} km</span>
+        <span>{{ currentRouteState.route?.estimatedTimeMinutes || '--' }} 分钟</span>
+        <span>{{ activeRouteStepIndex >= 0 ? `步骤 #${activeRouteStepIndex + 1}` : '全线' }}</span>
+      </div>
+      <div v-else class="route-hud-metrics">
+        <div class="route-hud-metric">
+          <span class="route-hud-label">总距离</span>
+          <strong>{{ currentRouteState.route?.distanceKm || '--' }} km</strong>
+        </div>
+        <div class="route-hud-metric">
+          <span class="route-hud-label">预计时间</span>
+          <strong>{{ currentRouteState.route?.estimatedTimeMinutes || '--' }} 分钟</strong>
+        </div>
+        <div class="route-hud-metric">
+          <span class="route-hud-label">当前步骤</span>
+          <strong>{{ activeRouteStepIndex >= 0 ? `#${activeRouteStepIndex + 1}` : '全线' }}</strong>
+        </div>
+      </div>
+      <div v-if="!isRouteHudCompact" class="route-hud-step">
+        {{ activeRouteStepIndex >= 0 ? getActiveRouteStepText() : '已高亮整条推荐路线，地图上的编号节点可与右侧步骤对应。' }}
+      </div>
+      <div v-if="!isRouteHudCompact" class="route-hud-actions">
+        <button class="route-hud-btn" @click="focusWholeRoute">查看全线</button>
+        <button class="route-hud-btn ghost" @click="clearRouteOverlay">隐藏路线</button>
+      </div>
+      <div v-if="!isRouteHudCompact" class="route-hud-note">虚线表示求救点或医院与实际可通行道路起终点之间的偏移。</div>
+    </div>
     <!-- 扫描线特效 -->
     <div class="scan-line"></div>
   </div>
@@ -25,6 +68,9 @@ let markerGroup = null
 let provinceLayer = null
 let routeLayerGroup = null
 let staleTimer  = null
+const currentRouteState = ref(null)
+const activeRouteStepIndex = ref(-1)
+const isRouteHudCompact = ref(false)
 const added = new Map()   // key → marker ref，用于标记时效管理
 const STALE_THRESHOLD = 30 * 60 * 1000  // 30 分钟
 
@@ -166,6 +212,31 @@ function updateStaleMarkers() {
 
 function clearRouteOverlay() {
   routeLayerGroup?.clearLayers()
+  currentRouteState.value = null
+  activeRouteStepIndex.value = -1
+  isRouteHudCompact.value = false
+  setHeatmapRouteMode(false)
+}
+
+function toggleRouteHudCompact() {
+  isRouteHudCompact.value = !isRouteHudCompact.value
+}
+
+function decodeStepPolyline(step) {
+  const segments = String(step?.polyline || '').split(';').filter(Boolean)
+  const points = []
+  let lastKey = null
+
+  segments.forEach((pair) => {
+    const [lng, lat] = pair.split(',').map(Number)
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
+    const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
+    if (key === lastKey) return
+    lastKey = key
+    points.push([lat, lng])
+  })
+
+  return points
 }
 
 function decodeRoutePolyline(route) {
@@ -174,10 +245,7 @@ function decodeRoutePolyline(route) {
   let lastKey = null
 
   steps.forEach((step) => {
-    const segments = String(step?.polyline || '').split(';').filter(Boolean)
-    segments.forEach((pair) => {
-      const [lng, lat] = pair.split(',').map(Number)
-      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return
+    decodeStepPolyline(step).forEach(([lat, lng]) => {
       const key = `${lat.toFixed(6)},${lng.toFixed(6)}`
       if (key === lastKey) return
       lastKey = key
@@ -202,19 +270,85 @@ function calcMeters(a, b) {
   return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
 }
 
-function showRouteOverlay(detail) {
+function setHeatmapRouteMode(active) {
+  if (!heatLayer?._canvas) return
+  heatLayer._canvas.style.opacity = active ? '0.18' : '1'
+  heatLayer._canvas.style.filter = active ? 'saturate(0.65)' : 'saturate(1)'
+  heatLayer._canvas.style.transition = 'opacity 180ms ease, filter 180ms ease'
+}
+
+function makeEndpointIcon(kind, label) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="route-endpoint ${kind}">
+      <div class="route-endpoint-badge">${kind === 'start' ? 'SOS' : '医'}</div>
+      <div class="route-endpoint-label">${label}</div>
+    </div>`,
+    iconSize: [120, 34],
+    iconAnchor: [18, 17],
+    popupAnchor: [0, -16],
+  })
+}
+
+function makeAnchorIcon(kind) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="route-anchor ${kind}"></div>`,
+    iconSize: [12, 12],
+    iconAnchor: [6, 6],
+  })
+}
+
+function makeTurnIcon(index, active = false) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="route-turn-marker ${active ? 'active' : ''}">${index + 1}</div>`,
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+  })
+}
+
+function renderTurnMarkers(route) {
+  const steps = Array.isArray(route?.fullSteps) ? route.fullSteps.slice(0, 6) : []
+  steps.forEach((step, index) => {
+    const stepPoints = decodeStepPolyline(step)
+    if (stepPoints.length === 0) return
+    const marker = L.marker(stepPoints[stepPoints.length - 1], {
+      icon: makeTurnIcon(index, activeRouteStepIndex.value === index),
+      zIndexOffset: 900 + index,
+    })
+      .bindPopup(`<div class="sos-popup"><div class="p-title">步骤 ${index + 1}</div><div class="p-row"><span>${step.instruction || ''}</span><span>${step.distance || 0}m</span></div></div>`)
+      .on('click', () => highlightRouteStep(index))
+      .addTo(routeLayerGroup)
+    marker.stepIndex = index
+  })
+}
+
+function rebuildRouteOverlay(detail, options = {}) {
   if (!map || !routeLayerGroup || !detail?.route) return
 
-  clearRouteOverlay()
+  const { focusBounds = true } = options
+  currentRouteState.value = detail
+  setHeatmapRouteMode(true)
+  routeLayerGroup.clearLayers()
 
   const points = decodeRoutePolyline(detail.route)
   if (points.length < 2) return
 
-  const routeLine = L.polyline(points, {
-    color: '#00e5ff',
-    weight: 5,
-    opacity: 0.9,
+  const routeShadow = L.polyline(points, {
+    color: '#031623',
+    weight: 12,
+    opacity: 0.94,
     lineJoin: 'round',
+    lineCap: 'round',
+  }).addTo(routeLayerGroup)
+
+  const routeGlow = L.polyline(points, {
+    color: '#23e7ff',
+    weight: 6,
+    opacity: 0.98,
+    lineJoin: 'round',
+    lineCap: 'round',
   }).addTo(routeLayerGroup)
 
   const startCoords = Array.isArray(detail.route.sourceCoordinates)
@@ -226,41 +360,131 @@ function showRouteOverlay(detail) {
   const routeStart = points[0]
   const routeEnd = points[points.length - 1]
 
-  L.circleMarker(startCoords, {
-    radius: 7,
-    color: '#00ff88',
-    weight: 2,
-    fillColor: '#00ff88',
-    fillOpacity: 0.9,
-  }).bindPopup(`<div class="sos-popup"><div class="p-title">起点</div><div class="p-row"><span>${detail.name || detail.mac || ''}</span><span>${detail.address || ''}</span></div></div>`).addTo(routeLayerGroup)
+  L.marker(startCoords, {
+    icon: makeEndpointIcon('start', detail.name || detail.mac || '求救点'),
+    zIndexOffset: 1200,
+  })
+    .bindPopup(
+      `<div class="sos-popup route-popup"><div class="p-title">求救点</div><div class="p-row"><span>${detail.name || detail.mac || ''}</span><span>${detail.address || ''}</span></div></div>`,
+      { className: 'route-popup-wrap', maxWidth: 320 },
+    )
+    .addTo(routeLayerGroup)
 
-  L.circleMarker(endCoords, {
-    radius: 7,
-    color: '#ffcc00',
-    weight: 2,
-    fillColor: '#ffcc00',
-    fillOpacity: 0.9,
-  }).bindPopup(`<div class="sos-popup"><div class="p-title">终点</div><div class="p-row"><span>${detail.hospitalName || '医院'}</span><span>${detail.route.distanceKm || ''} km</span></div></div>`).addTo(routeLayerGroup)
+  L.marker(endCoords, {
+    icon: makeEndpointIcon('end', detail.hospitalName || '目的医院'),
+    zIndexOffset: 1200,
+  })
+    .bindPopup(
+      `<div class="sos-popup route-popup"><div class="p-title">目的医院</div><div class="p-row"><span>${detail.hospitalName || '医院'}</span><span>${detail.route.distanceKm || ''} km</span></div></div>`,
+      { className: 'route-popup-wrap', maxWidth: 320 },
+    )
+    .addTo(routeLayerGroup)
 
   if (calcMeters(startCoords, routeStart) > 20) {
     L.polyline([startCoords, routeStart], {
-      color: '#00ff88',
+      color: '#00f0b8',
       weight: 2,
       opacity: 0.8,
       dashArray: '6, 6',
     }).addTo(routeLayerGroup)
+    L.marker(routeStart, { icon: makeAnchorIcon('start'), interactive: false }).addTo(routeLayerGroup)
   }
 
   if (calcMeters(routeEnd, endCoords) > 20) {
     L.polyline([routeEnd, endCoords], {
-      color: '#ffcc00',
+      color: '#ffd966',
       weight: 2,
       opacity: 0.8,
       dashArray: '6, 6',
     }).addTo(routeLayerGroup)
+    L.marker(routeEnd, { icon: makeAnchorIcon('end'), interactive: false }).addTo(routeLayerGroup)
   }
 
-  map.fitBounds(routeLine.getBounds(), { padding: [40, 40], maxZoom: 16 })
+  renderTurnMarkers(detail.route)
+
+  if (focusBounds) {
+    map.fitBounds(routeShadow.getBounds(), {
+      paddingTopLeft: [40, 120],
+      paddingBottomRight: [40, 60],
+      maxZoom: 16,
+    })
+  }
+
+  if (activeRouteStepIndex.value >= 0) {
+    highlightRouteStep(activeRouteStepIndex.value, { fly: false, rerender: false })
+  }
+}
+
+function showRouteOverlay(detail) {
+  if (!map || !routeLayerGroup || !detail?.route) return
+  activeRouteStepIndex.value = -1
+  rebuildRouteOverlay(detail)
+}
+
+function highlightRouteStep(stepIndex, options = {}) {
+  const detail = currentRouteState.value
+  const route = detail?.route
+  const steps = Array.isArray(route?.fullSteps) ? route.fullSteps : []
+  if (!route || stepIndex == null || stepIndex < 0 || stepIndex >= steps.length) {
+    activeRouteStepIndex.value = -1
+    if (detail) rebuildRouteOverlay(detail, { focusBounds: false })
+    return
+  }
+
+  const { fly = true, rerender = true } = options
+  activeRouteStepIndex.value = stepIndex
+  if (rerender && detail) {
+    rebuildRouteOverlay(detail, { focusBounds: false })
+  }
+
+  const stepPoints = decodeStepPolyline(steps[stepIndex])
+  if (stepPoints.length < 2) return
+
+  const emphasisShadow = L.polyline(stepPoints, {
+    color: '#ffffff',
+    weight: 12,
+    opacity: 0.14,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(routeLayerGroup)
+
+  const emphasisLine = L.polyline(stepPoints, {
+    color: '#ffea5b',
+    weight: 7,
+    opacity: 1,
+    lineCap: 'round',
+    lineJoin: 'round',
+  }).addTo(routeLayerGroup)
+
+  emphasisShadow.bringToFront()
+  emphasisLine.bringToFront()
+
+  if (fly) {
+    map.fitBounds(emphasisLine.getBounds(), {
+      paddingTopLeft: [50, 140],
+      paddingBottomRight: [50, 80],
+      maxZoom: 17,
+    })
+  }
+
+  window.dispatchEvent(new CustomEvent('map-route-step-changed', {
+    detail: { stepIndex },
+  }))
+}
+
+function getActiveRouteStepText() {
+  const steps = currentRouteState.value?.route?.fullSteps || []
+  const step = steps[activeRouteStepIndex.value]
+  return step?.instruction || '已锁定当前步骤。'
+}
+
+function focusWholeRoute() {
+  if (!currentRouteState.value) return
+  activeRouteStepIndex.value = -1
+  rebuildRouteOverlay(currentRouteState.value)
+  window.dispatchEvent(new CustomEvent('map-route-step-changed', {
+    detail: { stepIndex: -1 },
+  }))
 }
 
 async function loadProvinceBoundary() {
@@ -316,6 +540,7 @@ onMounted(() => {
   
   // 初始化热力图层
   heatLayer = L.heatLayer([], { ...HEAT_CONFIG }).addTo(map)
+  setHeatmapRouteMode(false)
   
   // 初始化标记聚类组
   markerGroup = L.markerClusterGroup({
@@ -354,6 +579,9 @@ onUnmounted(() => {
   map?.remove()
   window.removeEventListener('map-flyto', handleFlyTo)
   window.removeEventListener('map-show-route', handleShowRoute)
+  window.removeEventListener('map-flyto-area', handleFlyToArea)
+  window.removeEventListener('map-highlight-route-step', handleHighlightRouteStep)
+  window.removeEventListener('map-focus-route', handleFocusRoute)
 })
 
 // 监听搜索状态变化，高亮/淡化标记
@@ -385,6 +613,30 @@ function handleShowRoute(e) {
   showRouteOverlay(e.detail)
 }
 window.addEventListener('map-show-route', handleShowRoute)
+
+function handleHighlightRouteStep(e) {
+  const stepIndex = Number(e.detail?.stepIndex)
+  const detail = e.detail?.routeOverlay
+  if (!currentRouteState.value && detail?.route) {
+    showRouteOverlay(detail)
+  }
+  if (!Number.isInteger(stepIndex) || stepIndex < 0) {
+    focusWholeRoute()
+    return
+  }
+  highlightRouteStep(stepIndex)
+}
+window.addEventListener('map-highlight-route-step', handleHighlightRouteStep)
+
+function handleFocusRoute(e) {
+  const detail = e?.detail
+  if (!currentRouteState.value && detail?.route) {
+    showRouteOverlay(detail)
+    return
+  }
+  focusWholeRoute()
+}
+window.addEventListener('map-focus-route', handleFocusRoute)
 
 // 监听飞入风险区域事件
 function handleFlyToArea(e) {
@@ -425,6 +677,153 @@ defineExpose({ flyToSos })
   overflow: hidden;
   border: 1px solid rgba(0, 200, 255, 0.2);
   box-shadow: inset 0 0 30px rgba(0, 10, 30, 0.6);
+}
+
+.route-hud {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 950;
+  width: min(360px, calc(100% - 28px));
+  min-width: 240px;
+  max-width: 460px;
+  min-height: 96px;
+  resize: both;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 229, 255, 0.16);
+  background: linear-gradient(180deg, rgba(3, 19, 32, 0.95), rgba(1, 10, 22, 0.92));
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(12px);
+}
+
+.route-hud.compact {
+  width: min(300px, calc(100% - 28px));
+  min-height: auto;
+  resize: horizontal;
+}
+
+.route-hud-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.route-hud-head-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.route-hud-tools {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.route-hud-icon-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(227, 246, 255, 0.82);
+  font-size: 0.6rem;
+  cursor: pointer;
+}
+
+.route-hud-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.route-hud-title {
+  color: #9ff6ff;
+  font-size: 0.78rem;
+  font-weight: bold;
+  letter-spacing: 0.06em;
+}
+
+.route-hud-subtitle {
+  margin-top: 3px;
+  color: rgba(208, 244, 255, 0.8);
+  font-size: 0.67rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.route-hud-compact-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: rgba(220, 247, 255, 0.9);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.route-hud-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.route-hud-metric {
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(6, 28, 45, 0.82);
+  border: 1px solid rgba(0, 229, 255, 0.08);
+}
+
+.route-hud-label {
+  display: block;
+  color: rgba(167, 212, 226, 0.62);
+  font-size: 0.58rem;
+  margin-bottom: 3px;
+}
+
+.route-hud-metric strong {
+  color: #f2feff;
+  font-size: 0.8rem;
+}
+
+.route-hud-step {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border-radius: 10px;
+  background: rgba(10, 35, 57, 0.74);
+  color: rgba(227, 248, 255, 0.88);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+
+.route-hud-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.route-hud-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 229, 255, 0.18);
+  background: rgba(0, 229, 255, 0.1);
+  color: #aaf4ff;
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+
+.route-hud-btn.ghost {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(217, 240, 250, 0.82);
+}
+
+.route-hud-note {
+  margin-top: 9px;
+  color: rgba(157, 200, 214, 0.56);
+  font-size: 0.56rem;
+  line-height: 1.45;
 }
 /* 扫描线特效 */
 .scan-line {
@@ -529,5 +928,140 @@ defineExpose({ flyToSos })
 .marker-cluster-large div {
   background-color: rgba(255, 51, 51, 0.4);
   color: #fff;
+}
+
+.route-endpoint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 110px;
+  padding: 4px 10px 4px 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+  backdrop-filter: blur(10px);
+}
+
+.route-endpoint.start {
+  background: rgba(255, 84, 84, 0.18);
+}
+
+.route-endpoint.end {
+  background: rgba(255, 214, 56, 0.18);
+}
+
+.route-endpoint-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.route-endpoint.start .route-endpoint-badge {
+  background: #ff5b5b;
+  color: #fff;
+  box-shadow: 0 0 18px rgba(255, 91, 91, 0.45);
+}
+
+.route-endpoint.end .route-endpoint-badge {
+  background: #ffd44a;
+  color: #201600;
+  box-shadow: 0 0 18px rgba(255, 212, 74, 0.4);
+}
+
+.route-endpoint-label {
+  max-width: 150px;
+  color: #eefcff;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.route-anchor {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.18);
+}
+
+.route-anchor.start {
+  background: #00f0b8;
+}
+
+.route-anchor.end {
+  background: #ffd966;
+}
+
+.route-turn-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(2, 18, 31, 0.92);
+  border: 2px solid rgba(0, 229, 255, 0.75);
+  color: #b7fbff;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  font-weight: bold;
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.24);
+}
+
+.route-turn-marker.active {
+  border-color: rgba(255, 234, 91, 0.95);
+  color: #fff4a3;
+  box-shadow: 0 0 16px rgba(255, 234, 91, 0.35);
+}
+
+.route-popup-wrap .leaflet-popup-content-wrapper {
+  background: linear-gradient(180deg, rgba(6, 20, 36, 0.98), rgba(3, 13, 25, 0.98));
+  color: #effbff;
+  border: 1px solid rgba(0, 229, 255, 0.18);
+  border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
+}
+
+.route-popup-wrap .leaflet-popup-content {
+  margin: 14px 16px;
+  min-width: 220px;
+}
+
+.route-popup-wrap .leaflet-popup-tip {
+  background: rgba(3, 13, 25, 0.98);
+}
+
+.route-popup .p-title {
+  color: #ff7878;
+  font-size: 0.96rem;
+  font-weight: bold;
+  margin-bottom: 10px;
+}
+
+.route-popup .p-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  color: #eef8ff;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.route-popup .p-row span:first-child {
+  color: rgba(177, 220, 235, 0.74);
+}
+
+.route-popup .p-row span:last-child {
+  color: #dff4ff;
+  text-align: right;
 }
 </style>
