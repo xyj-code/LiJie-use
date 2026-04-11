@@ -78,6 +78,7 @@ let map = null
 let heatmap = null
 let infoWindow = null
 let staleTimer = null
+let flyToTimer = null
 let activeInfoTargetKey = ''
 const added = new Map()
 let routeOverlays = []
@@ -730,15 +731,47 @@ function applyMarkerFilterState() {
 
 function flyToSos(sos) {
   if (!map || !sos?.location?.coordinates) return
-  const point = toGcjPoint(sos.location.coordinates)
-  if (!point) return
-  map.setZoomAndCenter(15, point, false, 500)
-
   const key = `${sos.senderMac}|${sos.timestamp}`
   const entry = added.get(key)
+  const markerPosition = entry?.marker?.getPosition?.()
+  const point = markerPosition
+    ? [markerPosition.lng, markerPosition.lat]
+    : toGcjPoint(sos.location.coordinates)
+  if (!point) return
+
   if (entry?.marker) {
-    openInfoWindow(point, mkPopup(entry.sosData))
+    map.setFitView([entry.marker], false, [180, 180, 180, 180])
   }
+
+  if (flyToTimer) {
+    clearTimeout(flyToTimer)
+    flyToTimer = null
+  }
+
+  const currentZoom = Number(map.getZoom?.() || 0)
+  const targetZoom = Math.max(currentZoom, 16)
+  const stageZoom = targetZoom >= 16 ? Math.max(Math.min(targetZoom - 2, 14), 12) : targetZoom
+
+  map.setZoomAndCenter(stageZoom, point, false, 450)
+
+  flyToTimer = setTimeout(() => {
+    if (!map) return
+    map.setZoomAndCenter(targetZoom, point, false, 650)
+
+    flyToTimer = setTimeout(() => {
+      if (!map) return
+      if (entry?.marker) {
+        activeInfoTargetKey = `sos:${key}`
+        openInfoWindow(point, mkPopup(entry.sosData))
+        setTimeout(() => {
+          if (!map) return
+          const settleZoom = Math.max(Number(map.getZoom?.() || 0), targetZoom)
+          map.setZoomAndCenter(settleZoom, point, false, 280)
+        }, 30)
+      }
+      flyToTimer = null
+    }, 520)
+  }, 180)
 }
 
 function handleFlyTo(e) {
@@ -851,6 +884,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (staleTimer) clearTimeout(staleTimer)
+  if (flyToTimer) clearTimeout(flyToTimer)
   clearAllRouteOverlays()
   window.removeEventListener('map-flyto', handleFlyTo)
   window.removeEventListener('map-show-route', handleShowRoute)
