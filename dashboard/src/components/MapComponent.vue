@@ -56,10 +56,10 @@
 
 <script setup>
 import { ref, watchEffect, watch, onMounted, onUnmounted } from 'vue'
-import { useSocket, BLOOD_LABELS } from '../composables/useSocket'
+import { useSocket, BLOOD_LABELS, WORKFLOW_LABELS, getAlertKey, getEffectiveBloodType } from '../composables/useSocket'
 import { wgs84ToGcj02 } from '../utils/coordTransform'
 
-const { alerts, searchState } = useSocket()
+const { alerts, searchState, selectAlert } = useSocket()
 const mapEl = ref(null)
 const mapReady = ref(false)
 const mapError = ref('')
@@ -176,16 +176,16 @@ function createMarkerElement() {
 }
 
 function mkPopup(sos) {
-  const bt = sos.medicalProfile?.bloodTypeDetail !== undefined
-    ? BLOOD_LABELS[sos.medicalProfile.bloodTypeDetail] ?? '未知'
-    : BLOOD_LABELS[sos.bloodType] ?? '未知'
+  const bt = BLOOD_LABELS[String(getEffectiveBloodType(sos))] ?? '未知'
   const time = new Date(sos.timestamp).toLocaleString('zh-CN')
   const relay = sos.reportedBy?.length ?? 1
   const mp = sos.medicalProfile || {}
   const [lng, lat] = sos.location?.coordinates || [0, 0]
+  const workflow = WORKFLOW_LABELS[sos.workflowStatus] || '待处理'
 
   return `<div class="sos-popup">
     <div class="p-title">⚠ SOS 求救信号</div>
+    <div class="p-row"><span>处置状态</span><span class="hi">${workflow}</span></div>
     <div class="p-row"><span>设备 MAC</span><span>${sos.senderMac}</span></div>
     ${mp.name ? `<div class="p-row"><span>姓名</span><span class="hi-green">${mp.name}</span></div>` : ''}
     ${mp.age ? `<div class="p-row"><span>年龄</span><span>${mp.age}</span></div>` : ''}
@@ -193,6 +193,8 @@ function mkPopup(sos) {
     ${mp.allergies ? `<div class="p-row"><span class="warn">⚠ 过敏</span><span class="hi-orange">${mp.allergies}</span></div>` : ''}
     ${mp.medicalHistory ? `<div class="p-row"><span>病史</span><span>${mp.medicalHistory}</span></div>` : ''}
     ${mp.emergencyContact ? `<div class="p-row"><span>联系人</span><span class="hi-purple">${mp.emergencyContact}</span></div>` : ''}
+    ${sos.dispatchInfo?.teamName ? `<div class="p-row"><span>救援队</span><span class="hi-green">${sos.dispatchInfo.teamName}</span></div>` : ''}
+    ${sos.dispatchInfo?.hospitalName ? `<div class="p-row"><span>目标医院</span><span>${sos.dispatchInfo.hospitalName}</span></div>` : ''}
     <div class="p-row"><span>坐标</span><span class="coord">${lng.toFixed(4)}°E, ${lat.toFixed(4)}°N</span></div>
     <div class="p-row"><span>求救时间</span><span>${time}</span></div>
     <div class="p-row"><span>中继次数</span><span class="hi">${relay} 次</span></div>
@@ -219,8 +221,15 @@ function toggleInfoWindow(targetKey, position, content) {
 }
 
 function addMarker(sos) {
-  const key = `${sos.senderMac}|${sos.timestamp}`
-  if (added.has(key) || !map) return
+  const key = getAlertKey(sos)
+  if (!key || !map) return
+  const existingEntry = added.get(key)
+  if (existingEntry) {
+    existingEntry.sosData = { ...existingEntry.sosData, ...sos }
+    existingEntry.marker.setExtData({ sosData: existingEntry.sosData })
+    return
+  }
+
   const point = toGcjPoint(sos.location?.coordinates)
   if (!point) return
 
@@ -232,19 +241,39 @@ function addMarker(sos) {
     offset: new AMapLib.Pixel(-15, -15),
     zIndex: 130,
   })
-  marker.setExtData({ sosData: sos })
+  const entry = { marker, el: contentEl, sosData: { ...sos } }
+  marker.setExtData({ sosData: entry.sosData })
   marker.on('click', () => {
-    const opened = toggleInfoWindow(`sos:${key}`, point, mkPopup(sos))
+    const currentSos = entry.sosData
+    const currentPoint = toGcjPoint(currentSos.location?.coordinates) || point
+    selectAlert(currentSos)
+    const opened = toggleInfoWindow(`sos:${key}`, currentPoint, mkPopup(currentSos))
     if (opened) {
       const nextZoom = Math.max(map.getZoom() || 5, 15)
-      map.setZoomAndCenter(nextZoom, point, false, 500)
+      map.setZoomAndCenter(nextZoom, currentPoint, false, 500)
     }
   })
   marker.setMap(map)
 
   setTimeout(() => contentEl.classList.add('flash-in'), 50)
-  added.set(key, { marker, el: contentEl, sosData: sos })
+  added.set(key, entry)
   scheduleStaleCheck()
+}
+
+function syncMarkers() {
+  const activeKeys = new Set(alerts.value.map((item) => getAlertKey(item)).filter(Boolean))
+
+  for (const [key, entry] of added.entries()) {
+    if (activeKeys.has(key)) continue
+    if (activeInfoTargetKey === `sos:${key}`) {
+      infoWindow?.close()
+      activeInfoTargetKey = ''
+    }
+    entry.marker?.setMap?.(null)
+    added.delete(key)
+  }
+
+  alerts.value.forEach(addMarker)
 }
 
 function scheduleStaleCheck() {
@@ -818,7 +847,7 @@ function handleFlyToArea(e) {
 
 watchEffect(() => {
   if (!mapReady.value) return
-  alerts.value.forEach(addMarker)
+  syncMarkers()
   updateHeatmap()
 })
 
