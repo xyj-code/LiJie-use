@@ -50,6 +50,7 @@
       </div>
       <div v-if="!isRouteHudCompact" class="route-hud-note">虚线表示求救点或医院与实际可通行道路起终点之间的偏移。</div>
     </div>
+    <div class="map-approval">{{ MAP_APPROVAL_TEXT }}</div>
     <div class="scan-line"></div>
   </div>
 </template>
@@ -60,6 +61,7 @@ import { useSocket, BLOOD_LABELS, WORKFLOW_LABELS, getAlertKey, getEffectiveBloo
 import { wgs84ToGcj02 } from '../utils/coordTransform'
 
 const { alerts, searchState, selectAlert } = useSocket()
+const MAP_APPROVAL_TEXT = '\u5ba1\u56fe\u53f7 GS(2024)1158\u53f7'
 const mapEl = ref(null)
 const mapReady = ref(false)
 const mapError = ref('')
@@ -884,6 +886,15 @@ onMounted(async () => {
     rotateEnable: false,
   })
 
+  map.on('complete', () => {
+    try {
+      const mapApprovalNumber = AMapLib?.Map?.mapNumber?.()
+      console.log('[Map] approval number:', mapApprovalNumber || 'unavailable')
+    } catch (error) {
+      console.warn('[Map] approval number lookup failed:', error?.message || error)
+    }
+  })
+
   infoWindow.on('close', () => {
     activeInfoTargetKey = ''
   })
@@ -951,6 +962,23 @@ defineExpose({ flyToSos })
     radial-gradient(circle at 20% 18%, rgba(0, 170, 255, 0.08), transparent 28%),
     radial-gradient(circle at 82% 78%, rgba(0, 255, 217, 0.06), transparent 30%),
     linear-gradient(180deg, rgba(2, 10, 18, 0.06), rgba(2, 10, 18, 0.14));
+}
+
+.map-approval {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 970;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 200, 255, 0.16);
+  background: rgba(3, 14, 26, 0.82);
+  color: rgba(214, 239, 255, 0.82);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
 }
 
 .map-error-panel {
