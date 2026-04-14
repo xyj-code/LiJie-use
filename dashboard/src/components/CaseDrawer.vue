@@ -175,8 +175,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { useSocket, BLOOD_LABELS, WORKFLOW_LABELS, getEffectiveBloodType } from '../composables/useSocket'
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
+import { requestJson } from '../utils/api'
 
 const {
   selectedAlert,
@@ -254,11 +253,7 @@ async function loadDetail(id = currentCaseId.value) {
   if (!id) return
   loading.value = true
   try {
-    const res = await fetch(`${API_BASE}/api/sos/${id}/detail`)
-    const json = await res.json()
-    if (!res.ok) {
-      throw new Error(json.error || '获取案件详情失败')
-    }
+    const json = await requestJson(`/api/sos/${id}/detail`)
     detail.value = json.data?.sos || null
     timeline.value = Array.isArray(json.data?.timeline) ? json.data.timeline : []
     if (detail.value) {
@@ -280,15 +275,10 @@ async function submitAction(action, payload) {
   actionError.value = ''
 
   try {
-    const res = await fetch(`${API_BASE}/api/sos/${id}/${action}`, {
+    const json = await requestJson(`/api/sos/${id}/${action}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
-    const json = await res.json()
-    if (!res.ok) {
-      throw new Error(json.error || '操作失败')
-    }
 
     const nextSos = json.data?.sos || null
     const nextTimelineItem = json.data?.timelineItem || null

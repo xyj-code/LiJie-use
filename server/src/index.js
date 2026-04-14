@@ -34,6 +34,21 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    error: `接口不存在: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: '请求体 JSON 解析失败' });
+  }
+
+  console.error('[Server] Unhandled error:', err);
+  return res.status(500).json({ error: '服务器内部错误' });
+});
+
 // MongoDB connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/rescue_mesh';
 const PORT = process.env.PORT || 3000;
